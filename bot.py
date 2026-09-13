@@ -117,7 +117,7 @@ async def global_error_handler(update: object, context) -> None:
 
 def build_bot_application() -> Application:
     """Builds and wires all Telegram handlers into the Application instance."""
-    if not settings.telegram_token:
+    if not settings.telegram_token or settings.telegram_token.startswith("your_"):
         logger.warning(
             "TELEGRAM_BOT_TOKEN is not set in environment or .env file! "
             "Please configure your token before running the bot in polling mode."
@@ -132,7 +132,7 @@ def build_bot_application() -> Application:
         pool_timeout=15.0,
         httpx_kwargs={"transport": httpx.AsyncHTTPTransport(retries=3)},
     )
-    app_builder = ApplicationBuilder().token(settings.telegram_token or "dummy:token_placeholder").request(req)
+    app_builder = ApplicationBuilder().token(settings.telegram_token).request(req)
     application = app_builder.build()
 
     # Add Error Handler
@@ -272,10 +272,24 @@ async def main() -> None:
     """Master asynchronous initialization and execution loop."""
     logger.info("Starting Real Freelance Jobs Bot System...")
 
-    # 1. Initialize Database Schema
+    # 1. Check Render deployment and environment variables
+    is_render = settings.is_render_deployment()
+    valid_env, missing_vars = settings.validate_required_env_vars()
+
+    if is_render:
+        logger.info("[INFO] Running on Render platform")
+        if not valid_env:
+            logger.error(f"[ERROR] Missing required environment variables on Render: {', '.join(missing_vars)}")
+            logger.error("Please configure these variables in Render dashboard")
+            await run_fastapi_server()
+            return
+        else:
+            logger.info("[OK] All required environment variables configured on Render")
+
+    # 2. Initialize Database Schema
     await init_db()
 
-    # 2. Verify AI Provider Connectivity
+    # 3. Verify AI Provider Connectivity
     ai_status = await verify_ai_connection()
     if ai_status["status"] == "connected":
         logger.info(f"[OK] AI Connection Verified: {ai_status['message']}")
@@ -286,10 +300,10 @@ async def main() -> None:
     else:
         logger.warning(f"[WARN] AI Status: {ai_status['message']} (Automated heuristic fallback active)")
 
-    # 3. Check Bot Configuration
-    if not settings.telegram_token or settings.telegram_token.startswith("your_"):
+    # 4. Check Bot Configuration
+    if not settings.telegram_token or settings.telegram_token.startswith("your_") or settings.telegram_token.startswith("dummy"):
         logger.warning(
-            "[WARN] No valid TELEGRAM_BOT_TOKEN found in .env! "
+            "[WARN] No valid TELEGRAM_BOT_TOKEN found in environment or .env file! "
             "The bot polling service cannot start without a valid token. "
             "Running FastAPI health-check server only."
         )

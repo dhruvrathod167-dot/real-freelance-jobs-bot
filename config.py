@@ -1,11 +1,11 @@
 """
 Application Configuration Module
-Loads configuration from environment variables and .env file using Pydantic.
-Ensures strong typing, secure defaults, and easy cloud deployment.
+Loads configuration from environment variables with fallback to .env file.
+Optimized for Render deployment with proper environment variable precedence.
 """
 
 from typing import List, Set, Optional
-from pydantic import Field
+from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import os
 
@@ -15,7 +15,9 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=False
+        case_sensitive=False,
+        # Allow missing environment variables for production deployment
+        env_parse_strict=False
     )
 
     # Telegram Bot Settings
@@ -115,6 +117,28 @@ class Settings(BaseSettings):
         """Check if a given Telegram user ID is the group owner (highest authority)."""
         owner = self.owner_id
         return owner is not None and user_id == owner
+
+    def is_render_deployment(self) -> bool:
+        """Check if running on Render platform."""
+        return os.environ.get('RENDER') == 'true' or 'render.com' in os.environ.get('HOSTNAME', '')
+
+    def validate_required_env_vars(self) -> tuple[bool, list[str]]:
+        """Check if required environment variables are set for deployment."""
+        missing_vars = []
+
+        # Check for required variables
+        if not self.TELEGRAM_BOT_TOKEN:
+            missing_vars.append('TELEGRAM_BOT_TOKEN')
+        if not self.AI_API_KEY:
+            missing_vars.append('AI_API_KEY')
+
+        # Render-specific checks
+        if self.is_render_deployment() and missing_vars:
+            logger = globals().get('logger')
+            if logger:
+                logger.warning(f"Missing required environment variables on Render: {', '.join(missing_vars)}")
+
+        return len(missing_vars) == 0, missing_vars
 
 
 # Singleton configuration instance
