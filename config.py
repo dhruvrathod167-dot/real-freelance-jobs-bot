@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = Field(default="", description="Telegram Bot token from @BotFather")
     BOT_USERNAME: str = Field(default="RealFreelanceJobsBot", description="Bot handle without @")
     ADMIN_IDS_RAW: str = Field(default="", alias="ADMIN_IDS", description="Comma-separated admin Telegram IDs")
+    OWNER_ID_RAW: str = Field(default="", alias="OWNER_ID", description="Telegram Group Owner user ID (highest authority, full moderation bypass)")
     TELEGRAM_GROUP_ID: str = Field(default="-1004335696952", description="Group or Channel ID for job broadcasts (Legally Freelancing Working)")
     TELEGRAM_GROUP_NAME: str = Field(default="Legally Freelancing Working", description="Name of the official group")
 
@@ -98,6 +99,22 @@ class Settings(BaseSettings):
     def is_admin(self, user_id: int) -> bool:
         """Check if a given Telegram user ID has admin privileges."""
         return user_id in self.admin_id_list
+
+    @property
+    def owner_id(self) -> Optional[int]:
+        """Parse OWNER_ID into an integer Telegram user ID, or None if unconfigured."""
+        val = str(self.OWNER_ID_RAW).strip().strip("'\"")
+        if val:
+            try:
+                return int(val)
+            except ValueError:
+                return None
+        return None
+
+    def is_owner(self, user_id: int) -> bool:
+        """Check if a given Telegram user ID is the group owner (highest authority)."""
+        owner = self.owner_id
+        return owner is not None and user_id == owner
 
 
 # Singleton configuration instance
