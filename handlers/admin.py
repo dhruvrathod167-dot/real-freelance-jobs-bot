@@ -29,6 +29,17 @@ from database.crud import (
     unban_and_restore_user,
 )
 from utils.logger import logger
+
+
+def format_until_date(until_date) -> str:
+    """Format until_date for display in restriction messages."""
+    if not until_date:
+        return "🔒 Restricted permanently"
+    
+    if until_date.tzinfo is None:
+        until_date = until_date.replace(tzinfo=timezone.utc)
+    
+    return f"🔒 Restricted until: {until_date.strftime('%d %b %Y, %I:%M %p')}"
 from utils.rate_limiter import submission_rate_limiter
 from utils.formatters import (
     format_job_card,
@@ -234,9 +245,10 @@ async def ban_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if updated:
         await update.message.reply_text(f"🚫 User <code>{target_id}</code> has been banned. Reason: {html.escape(reason)}", parse_mode="HTML")
         try:
+            restriction_expiry = format_until_date(None)  # Permanent ban
             await context.bot.send_message(
                 chat_id=target_id,
-                text=f"🚫 <b>Account Suspended</b>\nYour account has been restricted from participating in Real Freelance Jobs.\nReason: {html.escape(reason)}",
+                text=f"🚫 <b>Account Suspended</b>\n{restriction_expiry}\n\nYour account has been restricted from participating in Real Freelance Jobs.\nReason: {html.escape(reason)}",
                 parse_mode="HTML"
             )
         except Exception:

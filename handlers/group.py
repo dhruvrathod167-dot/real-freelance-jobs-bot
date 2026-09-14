@@ -48,6 +48,17 @@ from services.communication_moderator import (
     scan_communication_message_ai,
 )
 from utils.logger import logger
+
+
+def format_until_date(until_date: Optional[datetime]) -> str:
+    """Format until_date for display in restriction messages."""
+    if not until_date:
+        return "🔒 Restricted permanently"
+    
+    if until_date.tzinfo is None:
+        until_date = until_date.replace(tzinfo=timezone.utc)
+    
+    return f"🔒 Restricted until: {until_date.strftime('%d %b %Y, %I:%M %p')}"
 from utils.authorization import (
     is_group_owner,
     is_authorized_admin,
@@ -420,12 +431,13 @@ async def group_message_moderation_handler(update: Update, context: ContextTypes
                 restore_time_str = until_date.strftime("%Y-%m-%d %H:%M:%S UTC")
 
                 # Post group notice
+                restriction_expiry = format_until_date(until_date)
                 group_notice = (
                     f"⚠️ <b>User restricted for 4 days.</b>\n"
                     f"<i>Communication Rule Violation</i>\n"
                     f"{user_mention} — ⚠️ <b>You are restricted for 4 days.</b>\n"
                     f"<b>Reason:</b> <i>{html.escape(comm_scan.details)}</i>\n\n"
-                    f"🕐 <b>Messaging will be restored on:</b> {restore_time_str}\n\n"
+                    f"{restriction_expiry}\n\n"
                     f"⚖️ <i>Community Rule: Be respectful and professional. No abusive language, harassment, or spam.</i>"
                 )
                 try:
@@ -434,9 +446,10 @@ async def group_message_moderation_handler(update: Update, context: ContextTypes
                     pass
 
                 # Notify user in DM
+                restriction_expiry = format_until_date(until_date)
                 dm_notice = (
                     f"⚠️ <b>You are restricted for 4 days.</b>\n"
-                    f"🕐 <b>Messaging will be restored on:</b> {restore_time_str}\n\n"
+                    f"{restriction_expiry}\n\n"
                     f"<b>Group:</b> {group_title}\n"
                     f"<b>Reason:</b> {html.escape(comm_scan.details)}\n\n"
                     f"Your sending permissions will automatically be restored at that exact time.\n"
@@ -482,23 +495,25 @@ async def group_message_moderation_handler(update: Update, context: ContextTypes
                     except TelegramError:
                         pass
 
+                    restriction_expiry = format_until_date(until_date)
                     group_notice = (
                         f"⚠️ <b>User restricted for 14 days.</b>\n"
                         f"{user_mention} has received an extended restriction for repeated violations.\n"
                         f"<b>Reason:</b> <i>{html.escape(comm_scan.details)}</i>\n\n"
-                        f"🕐 <b>Messaging will be automatically restored on:</b> {restore_time_str}"
+                        f"{restriction_expiry}"
                     )
                     try:
                         await context.bot.send_message(chat_id=chat.id, text=group_notice, parse_mode="HTML")
                     except TelegramError:
                         pass
 
+                    restriction_expiry = format_until_date(until_date)
                     dm_notice = (
                         f"🚫 <b>Extended Communication Restriction Notice</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"You have received an <b>extended 14-day restriction</b> in <b>{group_title}</b> due to repeated violations.\n\n"
                         f"<b>Reason:</b> {html.escape(comm_scan.details)}\n"
-                        f"🕐 <b>Messaging will be automatically restored on:</b> {restore_time_str}\n\n"
+                        f"{restriction_expiry}\n\n"
                         f"You may submit an appeal using /appeal."
                     )
                     try:
@@ -520,9 +535,11 @@ async def group_message_moderation_handler(update: Update, context: ContextTypes
                     except TelegramError:
                         pass
 
+                    restriction_expiry = format_until_date(None)  # Permanent ban
                     dm_notice = (
                         f"🚫 <b>Account Permanently Banned</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"{restriction_expiry}\n\n"
                         f"Your account has been <b>permanently banned</b> from <b>{group_title}</b>.\n"
                         f"<b>Reason:</b> Repeated severe communication violations ({html.escape(comm_scan.details)})\n\n"
                         f"You may submit an appeal to community administrators using /appeal."
