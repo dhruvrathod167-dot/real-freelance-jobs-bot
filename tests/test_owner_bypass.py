@@ -53,7 +53,8 @@ class TestOwnerFullBypass(unittest.IsolatedAsyncioTestCase):
                 yield session
                 await session.commit()
 
-        self.db_patcher = patch("handlers.group.get_db_session", side_effect=mock_get_db_session)
+        with patch("handlers.group.scan_job_heuristics") as mock_scan, \
+             patch("handlers.group.scan_communication_message_ai") as mock_comm_scan:        self.db_patcher = patch("handlers.group.get_db_session", side_effect=mock_get_db_session)
         self.db_patcher.start()
 
         # Set up owner ID in settings using PropertyMock
@@ -63,10 +64,6 @@ class TestOwnerFullBypass(unittest.IsolatedAsyncioTestCase):
 
         # Patch the owner_id property directly
         type(settings).owner_id = PropertyMock(return_value=self.owner_id)
-
-        # Mock settings admin IDs
-        self.admin_patcher = patch.object(settings, "admin_id_list", {self.admin_id})
-        self.admin_patcher.start()
 
         # Patch authorization functions with the owner ID
         self.auth_patcher_owner = patch("handlers.group.is_group_owner")
@@ -92,7 +89,6 @@ class TestOwnerFullBypass(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         """Clean up patches"""
         self.db_patcher.stop()
-        self.admin_patcher.stop()
         self.auth_patcher_owner.stop()
         self.auth_patcher_mod.stop()
         self.auth_patcher_ban.stop()
@@ -196,6 +192,7 @@ class TestOwnerFullBypass(unittest.IsolatedAsyncioTestCase):
         context.bot = MagicMock()
         context.bot.send_message = AsyncMock()
         context.bot.ban_chat_member = AsyncMock()
+        context.bot.restrict_chat_member = AsyncMock()
 
         # Mock scam detector to flag as high risk
         with patch("handlers.group.scan_job_heuristics") as mock_scan:
@@ -248,8 +245,17 @@ class TestOwnerFullBypass(unittest.IsolatedAsyncioTestCase):
 
             await group_message_moderation_handler(update, context)
 
-        # Owner should NOT be restricted
-        context.bot.restrict_chat_member.assert_not_called()
+        # Owner should NOT be restricted (only permissions should be granted)
+        # The function should only be called to grant permissions, not restrict
+        # Check that it was called only with full permissions (not restricted)
+        context.bot.restrict_chat_member.assert_called_once()
+        call_args = context.bot.restrict_chat_member.call_args
+        permissions = call_args[1]['permissions']
+        # Verify all permissions are True (full access, not restriction)
+        assert permissions.can_send_messages == True
+        assert permissions.can_send_polls == True
+        assert permissions.can_send_other_messages == True
+        assert permissions.can_add_web_page_previews == True
 
     # =====================================================================
     # Test: Owner Cannot Be Banned
@@ -334,7 +340,7 @@ class TestOwnerFullBypass(unittest.IsolatedAsyncioTestCase):
         """Test that regular members can still be banned for scam content"""
         update = MagicMock()
         update.effective_message = MagicMock()
-        update.effective_message.text = "Send $1000 for guaranteed income!"
+        update.effective_message.text = "Job: Pay $1000 to get hired! Western Union only!"
         update.effective_message.caption = None
         update.effective_message.delete = AsyncMock()
         update.effective_chat = MagicMock()
@@ -351,13 +357,36 @@ class TestOwnerFullBypass(unittest.IsolatedAsyncioTestCase):
         context.bot = MagicMock()
         context.bot.send_message = AsyncMock()
         context.bot.ban_chat_member = AsyncMock()
+        context.bot.restrict_chat_member = AsyncMock()
 
-        with patch("handlers.group.scan_job_heuristics") as mock_scan:
+        # Create verified user in database
+        async with self.session_factory() as session:
+            db_user = await get_or_create_user(
+                session=session,
+                user_id=self.regular_user_id,
+                first_name="Regular",
+                last_name="User",
+                username="user123",
+            )
+            db_user.status = "VERIFIED"
+            await session.commit()
+
+        with patch("handlers.group.scan_job_heuristics") as mock_scan, \
+             patch("handlers.group.scan_communication_message_ai") as mock_comm_scan:
             mock_scan.return_value = MagicMock(
                 risk_score=80.0,  # HIGH RISK
                 risk_level="very_high",
                 flags=["Upfront fee required"],
             )
+            mock_comm_scan.return_value = MagicMock(
+                is_violation=False,
+                severity="MILD",
+                details="No violation"
+            )
+
+            # Don't await the handler yet - check if mocks are working
+            print(f"Mock scan job result: {mock_scan.return_value}")
+            print(f"Mock comm scan result: {mock_comm_scan.return_value}")
 
             await group_message_moderation_handler(update, context)
 
@@ -390,8 +419,17 @@ class TestOwnerFullBypass(unittest.IsolatedAsyncioTestCase):
 
         await onboard_new_member(chat, user, context)
 
-        # Owner should never have their permissions restricted
-        context.bot.restrict_chat_member.assert_not_called()
+        # Owner should never have their permissions restricted (only granted)
+        # The function should only be called to grant permissions, not restrict
+        # Check that it was called only with full permissions (not restriction)
+        context.bot.restrict_chat_member.assert_called_once()
+        call_args = context.bot.restrict_chat_member.call_args
+        permissions = call_args[1]['permissions']
+        # Verify all permissions are True (full access, not restriction)
+        assert permissions.can_send_messages == True
+        assert permissions.can_send_polls == True
+        assert permissions.can_send_other_messages == True
+        assert permissions.can_add_web_page_previews == True
         # Owner should receive a special welcome message
         context.bot.send_message.assert_called_once()
         call_args = context.bot.send_message.call_args

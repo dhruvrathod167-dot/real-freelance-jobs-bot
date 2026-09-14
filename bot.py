@@ -67,6 +67,7 @@ from handlers.group import (
     new_member_onboarding_handler,
     chat_member_onboarding_handler,
     auto_restore_expired_restrictions,
+    ensure_owner_active,
 )
 from services.ai_analyzer import verify_ai_connection
 from api.server import app as fastapi_app
@@ -286,6 +287,17 @@ async def main() -> None:
         else:
             logger.info("[OK] All required environment variables configured on Render")
 
+    # 1.5. Validate Telegram token format safely
+    token_valid, token_msg = settings.validate_telegram_token()
+    if not token_valid:
+        logger.warning(f"[WARN] Telegram token validation failed: {token_msg}")
+        logger.warning("[WARN] The bot polling service cannot start without a valid token.")
+        logger.warning("Running FastAPI health-check server only.")
+        await run_fastapi_server()
+        return
+    else:
+        logger.info("[OK] Telegram token format is valid")
+
     # 2. Initialize Database Schema
     await init_db()
 
@@ -343,13 +355,24 @@ async def main() -> None:
                             )
                         except Exception as g_err:
                             logger.warning(f"[WARN] Error inspecting target group: {g_err}")
-                    await bot_app.updater.start_polling(
-                        allowed_updates=["message", "edited_message", "callback_query", "chat_member", "my_chat_member"],
-                        bootstrap_retries=5,
-                        poll_interval=0.5,
-                        timeout=20,
-                    )
-                    logger.info(f"Bot @{me.username} polling started successfully!")
+                    # Check if updater is already running to avoid duplicate polling
+                    if hasattr(bot_app, 'updater') and bot_app.updater and bot_app.updater.running:
+                        logger.warning("[WARN] Bot updater is already running, avoiding duplicate polling")
+                    else:
+                        await bot_app.updater.start_polling(
+                            allowed_updates=["message", "edited_message", "callback_query", "chat_member", "my_chat_member"],
+                            bootstrap_retries=5,
+                            poll_interval=0.5,
+                            timeout=20,
+                        )
+                        logger.info(f"Bot @{me.username} polling started successfully!")
+
+                    # CRITICAL: Ensure owner is active and has full permissions
+                    try:
+                        await ensure_owner_active(bot_app.bot)
+                        logger.info(f"[OK] Owner {settings.OWNER_ID} status verified and permissions ensured")
+                    except Exception as owner_exc:
+                        logger.warning(f"[WARN] Could not ensure owner status: {owner_exc}")
 
                     # Spawn background task for auto-restoring expired 4-day restrictions
                     unrestrict_task = asyncio.create_task(auto_unrestrict_background_loop(bot_app.bot))

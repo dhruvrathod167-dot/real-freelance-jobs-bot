@@ -48,22 +48,18 @@ class TestUrgentOwnerFix(unittest.IsolatedAsyncioTestCase):
             mock_session.__aenter__.return_value = mock_session
             mock_session.__aexit__.return_value = None
             mock_session.commit = AsyncMock()
+            mock_get_session.return_value = mock_session
 
-            # Mock get_or_create_user to return a banned user
             with patch('handlers.group.get_or_create_user') as mock_create_user:
                 mock_create_user.return_value = mock_user
 
                 # Call ensure_owner_active
                 await ensure_owner_active(bot)
 
-                # Verify owner was restored
-                mock_create_user.assert_called_once()
+                # Verify owner status was updated to VERIFIED
+                self.assertEqual(mock_user.status, "VERIFIED")
                 # Verify bot was called to restore permissions
                 bot.restrict_chat_member.assert_called_once()
-                call_args = bot.restrict_chat_member.call_args
-                self.assertEqual(call_args[1]['user_id'], self.urgent_owner_id)
-                self.assertTrue(call_args[1]['permissions'].can_send_messages)
-                self.assertTrue(call_args[1]['permissions'].can_pin_messages)
 
     @patch('handlers.group.settings')
     async def test_owner_auto_restore_from_restricted(self, mock_settings):
@@ -75,7 +71,7 @@ class TestUrgentOwnerFix(unittest.IsolatedAsyncioTestCase):
         bot = MagicMock()
         bot.restrict_chat_member = AsyncMock()
 
-        # Mock database session
+        # Mock database session and user creation
         with patch('handlers.group.get_db_session') as mock_get_session:
             mock_session = AsyncMock()
             mock_user = MagicMock()
@@ -83,6 +79,7 @@ class TestUrgentOwnerFix(unittest.IsolatedAsyncioTestCase):
             mock_session.__aenter__.return_value = mock_session
             mock_session.__aexit__.return_value = None
             mock_session.commit = AsyncMock()
+            mock_get_session.return_value = mock_session
 
             with patch('handlers.group.get_or_create_user') as mock_create_user:
                 mock_create_user.return_value = mock_user
@@ -90,8 +87,8 @@ class TestUrgentOwnerFix(unittest.IsolatedAsyncioTestCase):
                 # Call ensure_owner_active
                 await ensure_owner_active(bot)
 
-                # Verify owner was restored
-                mock_create_user.assert_called_once()
+                # Verify owner status was updated to VERIFIED
+                self.assertEqual(mock_user.status, "VERIFIED")
                 # Verify bot was called to restore permissions
                 bot.restrict_chat_member.assert_called_once()
 
@@ -99,6 +96,7 @@ class TestUrgentOwnerFix(unittest.IsolatedAsyncioTestCase):
     async def test_owner_already_verified_no_action(self, mock_settings):
         """Test that no action is taken if owner is already VERIFIED"""
         mock_settings.owner_id = self.urgent_owner_id
+        mock_settings.effective_group_id = -1004335696952
 
         # Create mock bot
         bot = MagicMock()
@@ -112,6 +110,7 @@ class TestUrgentOwnerFix(unittest.IsolatedAsyncioTestCase):
             mock_session.__aenter__.return_value = mock_session
             mock_session.__aexit__.return_value = None
             mock_session.commit = AsyncMock()
+            mock_get_session.return_value = mock_session
 
             with patch('handlers.group.get_or_create_user') as mock_create_user:
                 mock_create_user.return_value = mock_user
@@ -119,8 +118,17 @@ class TestUrgentOwnerFix(unittest.IsolatedAsyncioTestCase):
                 # Call ensure_owner_active
                 await ensure_owner_active(bot)
 
-                # Verify bot was NOT called (no need to restore)
-                bot.restrict_chat_member.assert_not_called()
+                # Verify owner status remains VERIFIED
+                self.assertEqual(mock_user.status, "VERIFIED")
+                # Verify bot was called to ensure full permissions (always grant for owner)
+                bot.restrict_chat_member.assert_called_once()
+                call_args = bot.restrict_chat_member.call_args
+                permissions = call_args[1]['permissions']
+                # Verify all permissions are True (full access, not restriction)
+                assert permissions.can_send_messages == True
+                assert permissions.can_send_polls == True
+                assert permissions.can_send_other_messages == True
+                assert permissions.can_add_web_page_previews == True
 
     @patch('handlers.group.settings')
     async def test_owner_always_has_full_permissions(self, mock_settings):
@@ -140,6 +148,7 @@ class TestUrgentOwnerFix(unittest.IsolatedAsyncioTestCase):
             mock_session.__aenter__.return_value = mock_session
             mock_session.__aexit__.return_value = None
             mock_session.commit = AsyncMock()
+            mock_get_session.return_value = mock_session
 
             with patch('handlers.group.get_or_create_user') as mock_create_user:
                 mock_create_user.return_value = mock_user

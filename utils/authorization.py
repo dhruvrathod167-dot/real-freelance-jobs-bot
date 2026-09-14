@@ -23,6 +23,19 @@ def is_group_owner(user_id: int) -> bool:
     return settings.is_owner(user_id)
 
 
+def is_authorized_admin(user_id: int) -> bool:
+    """
+    Check if a user is an authorized administrator or group owner.
+    
+    Args:
+        user_id: Telegram user ID to check
+        
+    Returns:
+        True if user is an admin or owner, False otherwise
+    """
+    return is_group_owner(user_id) or settings.is_admin(user_id)
+
+
 def should_skip_moderation(user_id: int) -> bool:
     """
     Determine if automatic moderation should be skipped for a user.
@@ -60,7 +73,7 @@ def should_skip_message_delete(user_id: int) -> bool:
 def should_skip_restrictions(user_id: int) -> bool:
     """
     Determine if automatic restrictions should be skipped for a user.
-    Owner can NEVER be restricted.
+    Owner and authorized admins can NEVER be automatically restricted.
     
     Args:
         user_id: Telegram user ID to check
@@ -68,8 +81,8 @@ def should_skip_restrictions(user_id: int) -> bool:
     Returns:
         True if user should not be restricted
     """
-    if is_group_owner(user_id):
-        logger.info(f"Skipping restrictions for owner {user_id}")
+    if is_group_owner(user_id) or settings.is_admin(user_id):
+        logger.info(f"Skipping restrictions for privileged user {user_id}")
         return True
     return False
 
@@ -77,7 +90,7 @@ def should_skip_restrictions(user_id: int) -> bool:
 def should_skip_ban(user_id: int) -> bool:
     """
     Determine if automatic bans should be skipped for a user.
-    Owner can NEVER be banned.
+    Owner and authorized admins can NEVER be automatically banned.
     
     Args:
         user_id: Telegram user ID to check
@@ -85,8 +98,8 @@ def should_skip_ban(user_id: int) -> bool:
     Returns:
         True if user should not be banned
     """
-    if is_group_owner(user_id):
-        logger.info(f"Skipping ban for owner {user_id}")
+    if is_group_owner(user_id) or settings.is_admin(user_id):
+        logger.info(f"Skipping ban for privileged user {user_id}")
         return True
     return False
 
@@ -94,7 +107,7 @@ def should_skip_ban(user_id: int) -> bool:
 def should_skip_permission_changes(user_id: int) -> bool:
     """
     Determine if automatic permission changes should be skipped for a user.
-    Owner permissions are NEVER modified by the bot.
+    Owner and admin permissions are NEVER modified by the bot's automatic enforcement.
     
     Args:
         user_id: Telegram user ID to check
@@ -102,7 +115,7 @@ def should_skip_permission_changes(user_id: int) -> bool:
     Returns:
         True if user permissions should not be modified
     """
-    if is_group_owner(user_id):
-        logger.info(f"Skipping permission changes for owner {user_id}")
+    if is_group_owner(user_id) or settings.is_admin(user_id):
+        logger.info(f"Skipping permission changes for privileged user {user_id}")
         return True
     return False

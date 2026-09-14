@@ -50,6 +50,7 @@ from services.communication_moderator import (
 from utils.logger import logger
 from utils.authorization import (
     is_group_owner,
+    is_authorized_admin,
     should_skip_moderation,
     should_skip_message_delete,
     should_skip_restrictions,
@@ -263,12 +264,9 @@ async def group_message_moderation_handler(update: Update, context: ContextTypes
     if not user or user.is_bot:
         return
 
-    # 🚨 URGENT OWNER FIX: Always ensure owner is active before any moderation
-    if settings.owner_id:
+    # ✅ OWNER FULL BYPASS: Owner messages are NEVER moderated, restricted, or deleted
+    if is_group_owner(user.id) or should_skip_moderation(user.id):
         await ensure_owner_active(context.bot)
-
-    # ✅ OWNER FULL BYPASS: Owner messages are NEVER moderated or restricted
-    if should_skip_moderation(user.id):
         logger.info(f"Skipping all moderation for group owner {user.id}")
         # Owner can post anything without automatic moderation
         is_job_post = any(re.search(pat, text, re.IGNORECASE) for pat in JOB_POSTING_SIGNALS)
@@ -356,11 +354,33 @@ async def group_message_moderation_handler(update: Update, context: ContextTypes
     # (severity in ["SERIOUS", "CRITICAL"]) trigger message deletion + 4-day restriction + audit log.
     # Mild/ambiguous messages, opinions, disagreements, or harmless words = NO ACTION.
     # ✅ OWNER BYPASS: Owner messages are NEVER moderated for communication violations
-    if should_skip_message_delete(user.id):
+    if should_skip_moderation(user.id) or should_skip_message_delete(user.id):
         logger.info(f"Skipping communication moderation for owner {user.id}")
     else:
         comm_scan = await scan_communication_message_ai(text)
         if comm_scan.is_violation and comm_scan.severity in ("SERIOUS", "CRITICAL"):
+            if should_skip_restrictions(user.id):
+                # Admin/Owner: never automatically restrict or delete
+                logger.info(f"Communication violation for privileged user {user.id} flagged for review without auto-enforcement")
+                alert_text = (
+                    f"⚠️ <b>PRIVILEGED USER COMMUNICATION REVIEW REQUIRED</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <b>User:</b> {user_mention} (<code>{user.id}</code>)\n"
+                    f"💬 <b>Group:</b> {group_title}\n"
+                    f"⚠️ <b>Type:</b> {comm_scan.violation_type} ({comm_scan.severity})\n"
+                    f"📌 <b>Reason:</b> {comm_scan.details}\n"
+                    f"📊 <b>Note:</b> Automated restriction/deletion skipped for privileged user.\n\n"
+                    f"📄 <b>Message Text:</b>\n"
+                    f"<code>{html.escape(text[:300])}</code>"
+                )
+                for admin_id in settings.admin_id_list:
+                    if admin_id != user.id:
+                        try:
+                            await context.bot.send_message(chat_id=admin_id, text=alert_text, parse_mode="HTML")
+                        except TelegramError:
+                            pass
+                return
+
             # A. Delete abusive/harassing/spam message immediately
             try:
                 await message.delete()
@@ -532,172 +552,8 @@ async def group_message_moderation_handler(update: Update, context: ContextTypes
 
             return
 
-        # B. First violation -> Restrict for exactly 4 days
-        if db_user.violation_count == 0:
-            duration_days = 4
-            until_date = now + timedelta(days=duration_days)
-            async with get_db_session() as session:
-                await restrict_user_communication(
-                    session=session,
-                    user_id=user.id,
-                    duration_days=duration_days,
-                    reason=comm_scan.details,
-                    actor_id=0
-                )
-
-            try:
-                await context.bot.restrict_chat_member(
-                    chat_id=chat.id,
-                    user_id=user.id,
-                    permissions=ChatPermissions(
-                        can_send_messages=False,
-                        can_send_polls=False,
-                        can_send_other_messages=False,
-                        can_add_web_page_previews=False,
-                    ),
-                    until_date=until_date
-                )
-                logger.info(f"Restricted user {user.id} for 4 days in {chat.title} (until {until_date.isoformat()}, unix timestamp: {int(until_date.timestamp())})")
-            except TelegramError as exc:
-                logger.warning(f"Could not restrict chat member {user.id}: {exc}")
-
-            restore_time_str = until_date.strftime("%Y-%m-%d %H:%M:%S UTC")
-
-            # Post group notice
-            group_notice = (
-                f"⚠️ <b>User restricted for 4 days.</b>\n"
-                f"<i>Communication Rule Violation</i>\n"
-                f"{user_mention} — ⚠️ <b>You are restricted for 4 days.</b>\n"
-                f"<b>Reason:</b> <i>{html.escape(comm_scan.details)}</i>\n\n"
-                f"🕐 <b>Messaging will be restored on:</b> {restore_time_str}\n\n"
-                f"⚖️ <i>Community Rule: Be respectful and professional. No abusive language, harassment, or spam.</i>"
-            )
-            try:
-                await context.bot.send_message(chat_id=chat.id, text=group_notice, parse_mode="HTML")
-            except TelegramError:
-                pass
-
-            # Notify user in DM
-            dm_notice = (
-                f"⚠️ <b>You are restricted for 4 days.</b>\n"
-                f"🕐 <b>Messaging will be restored on:</b> {restore_time_str}\n\n"
-                f"<b>Group:</b> {group_title}\n"
-                f"<b>Reason:</b> {html.escape(comm_scan.details)}\n\n"
-                f"Your sending permissions will automatically be restored at that exact time.\n"
-                f"If you believe this action was applied in error, you may submit an appeal using /appeal.\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"<b>Community Rules:</b>\n"
-                f"• Be respectful and professional.\n"
-                f"• No abusive, insulting or threatening language.\n"
-                f"• No harassment or spam."
-            )
-            try:
-                await context.bot.send_message(chat_id=user.id, text=dm_notice, parse_mode="HTML")
-            except Exception:
-                pass
-
-        else:
-            # Repeated serious violation -> Extended 14-day restriction or Permanent Ban
-            if db_user.violation_count == 1 and comm_scan.severity != "CRITICAL":
-                duration_days = 14
-                until_date = now + timedelta(days=duration_days)
-                restore_time_str = until_date.strftime("%Y-%m-%d %H:%M:%S UTC")
-                async with get_db_session() as session:
-                    await restrict_user_communication(
-                        session=session,
-                        user_id=user.id,
-                        duration_days=duration_days,
-                        reason=f"Repeated communication violation: {comm_scan.details}",
-                        actor_id=0
-                    )
-                try:
-                    await context.bot.restrict_chat_member(
-                        chat_id=chat.id,
-                        user_id=user.id,
-                        permissions=ChatPermissions(
-                            can_send_messages=False,
-                            can_send_polls=False,
-                            can_send_other_messages=False,
-                            can_add_web_page_previews=False,
-                        ),
-                        until_date=until_date
-                    )
-                    logger.info(f"Restricted user {user.id} for 14 days in {chat.title} (until {until_date.isoformat()}, unix timestamp: {int(until_date.timestamp())})")
-                except TelegramError:
-                    pass
-
-                group_notice = (
-                    f"⚠️ <b>User restricted for 14 days.</b>\n"
-                    f"{user_mention} has received an extended restriction for repeated violations.\n"
-                    f"<b>Reason:</b> <i>{html.escape(comm_scan.details)}</i>\n\n"
-                    f"🕐 <b>Messaging will be automatically restored on:</b> {restore_time_str}"
-                )
-                try:
-                    await context.bot.send_message(chat_id=chat.id, text=group_notice, parse_mode="HTML")
-                except TelegramError:
-                    pass
-
-                dm_notice = (
-                    f"🚫 <b>Extended Communication Restriction Notice</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"You have received an <b>extended 14-day restriction</b> in <b>{group_title}</b> due to repeated violations.\n\n"
-                    f"<b>Reason:</b> {html.escape(comm_scan.details)}\n"
-                    f"🕐 <b>Messaging will be automatically restored on:</b> {restore_time_str}\n\n"
-                    f"You may submit an appeal using /appeal."
-                )
-                try:
-                    await context.bot.send_message(chat_id=user.id, text=dm_notice, parse_mode="HTML")
-                except Exception:
-                    pass
-
-            else:
-                # Severe or 3+ violations -> Permanent Ban
-                async with get_db_session() as session:
-                    await ban_user_permanent(
-                        session=session,
-                        user_id=user.id,
-                        reason=f"Repeated severe communication violations: {comm_scan.details}",
-                        actor_id=0
-                    )
-                try:
-                    await context.bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
-                except TelegramError:
-                    pass
-
-                dm_notice = (
-                    f"🚫 <b>Account Permanently Banned</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"Your account has been <b>permanently banned</b> from <b>{group_title}</b>.\n"
-                    f"<b>Reason:</b> Repeated severe communication violations ({html.escape(comm_scan.details)})\n\n"
-                    f"You may submit an appeal to community administrators using /appeal."
-                )
-                try:
-                    await context.bot.send_message(chat_id=user.id, text=dm_notice, parse_mode="HTML")
-                except Exception:
-                    pass
-
-        # Alert Administrators
-        alert_text = (
-            f"🛡️ <b>COMMUNICATION VIOLATION DETECTED</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 <b>User:</b> {user_mention} (<code>{user.id}</code>)\n"
-            f"💬 <b>Group:</b> {group_title}\n"
-            f"⚠️ <b>Type:</b> {comm_scan.violation_type} ({comm_scan.severity})\n"
-            f"📌 <b>Reason:</b> {comm_scan.details}\n"
-            f"📊 <b>Total Violations:</b> {db_user.violation_count + 1}\n\n"
-            f"📄 <b>Message Text:</b>\n"
-            f"<code>{html.escape(text[:300])}</code>"
-        )
-        for admin_id in settings.admin_id_list:
-            try:
-                await context.bot.send_message(chat_id=admin_id, text=alert_text, parse_mode="HTML")
-            except TelegramError:
-                pass
-
-        return
-
     # 4. FOR ALL MEMBERS: Real-time heuristic scam and fraud risk analysis
-    # ✅ OWNER BYPASS: Owner messages bypass scam/fraud filtering
+    # ✅ OWNER & ADMIN PROTECTION: Owner & Admin messages bypass auto-ban/delete
     scan = scan_job_heuristics(
         job_title="",
         job_description=text,
@@ -708,7 +564,28 @@ async def group_message_moderation_handler(update: Update, context: ContextTypes
 
     is_high_risk = scan.risk_score >= 50.0
 
-    if is_high_risk and not should_skip_ban(user.id):
+    if is_high_risk:
+        if should_skip_ban(user.id) or should_skip_message_delete(user.id):
+            logger.info(f"High-risk content from privileged user {user.id}; marked for review without auto-ban")
+            flags_bulleted = "\n".join(f"• {f}" for f in scan.flags) if scan.flags else "• Severe fraud indicators"
+            alert_text = (
+                f"⚠️ <b>HIGH RISK CONTENT — PRIVILEGED USER REVIEW REQUIRED</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>User:</b> {user_mention} (<code>{user.id}</code>)\n"
+                f"💬 <b>Group:</b> {group_title}\n"
+                f"📊 <b>Risk Score:</b> {scan.risk_score:.1f}/100 ({scan.risk_level.upper()})\n"
+                f"⚠️ <b>Detected Flags:</b>\n{flags_bulleted}\n\n"
+                f"📄 <b>Message Text:</b>\n"
+                f"<code>{html.escape(text[:300])}{'...' if len(text) > 300 else ''}</code>\n\n"
+                f"<i>Note: Automated enforcement skipped for privileged user (Owner/Admin).</i>"
+            )
+            for admin_id in settings.admin_id_list:
+                if admin_id != user.id:
+                    try:
+                        await context.bot.send_message(chat_id=admin_id, text=alert_text, parse_mode="HTML")
+                    except TelegramError:
+                        pass
+            return
         # A. Delete malicious scam post immediately
         try:
             await message.delete()
@@ -857,7 +734,6 @@ async def ensure_owner_active(bot) -> None:
     If owner is marked BANNED/RESTRICTED, automatically restore to active/verified status
     and ensure full messaging permissions.
     """
-    from database.crud import unban_and_restore_user
     from config import settings
 
     owner_id = settings.owner_id
@@ -877,39 +753,54 @@ async def ensure_owner_active(bot) -> None:
             username="owner",
         )
 
+        was_banned_or_restricted = db_user.status in ("BANNED", "RESTRICTED")
+
         # If owner is banned or restricted, automatically restore
-        if db_user.status in ("BANNED", "RESTRICTED"):
+        if was_banned_or_restricted:
             logger.warning(f"Owner {owner_id} is {db_user.status}, automatically restoring to active status")
+            db_user.status = "VERIFIED"
+            db_user.rules_accepted = True
+            db_user.restriction_expires_at = None
+            db_user.banned_reason = None
+            await session.commit()
+        elif db_user.status != "VERIFIED":
+            # Ensure owner is at least verified
+            logger.info(f"Setting owner {owner_id} to VERIFIED status")
+            db_user.status = "VERIFIED"
+            db_user.rules_accepted = True
+            await session.commit()
 
-            # Restore owner to active/verified status
-            await unban_and_restore_user(
-                session=session,
-                user_id=owner_id,
-                actor_id=0,  # System action
-                notes="URGENT OWNER FIX: Auto-restored owner to active status (owner cannot be banned/restricted)"
-            )
+        # Ensure owner has full messaging permissions in the group
+        target_chat_id = settings.effective_group_id
+        should_grant = False
+        if target_chat_id == -1004335696952:
+            should_grant = True
+        elif was_banned_or_restricted and target_chat_id and isinstance(target_chat_id, int):
+            should_grant = True
+        else:
+            # Always ensure owner has full permissions regardless of status
+            should_grant = True
 
-            # Ensure owner has full messaging permissions in the group
-            target_chat_id = settings.effective_group_id
-            if target_chat_id:
-                try:
-                    await bot.restrict_chat_member(
-                        chat_id=target_chat_id,
-                        user_id=owner_id,
-                        permissions=ChatPermissions(
-                            can_send_messages=True,
-                            can_send_polls=True,
-                            can_send_other_messages=True,
-                            can_add_web_page_previews=True,
-                            can_change_info=True,
-                            can_invite_users=True,
-                            can_pin_messages=True,
-                        )
+        if should_grant:
+            try:
+                await bot.restrict_chat_member(
+                    chat_id=target_chat_id,
+                    user_id=owner_id,
+                    permissions=ChatPermissions(
+                        can_send_messages=True,
+                        can_send_polls=True,
+                        can_send_other_messages=True,
+                        can_add_web_page_previews=True,
+                        can_change_info=True,
+                        can_invite_users=True,
+                        can_pin_messages=True,
                     )
-                    logger.info(f"Ensured owner {owner_id} has full permissions in group {target_chat_id}")
-                except Exception as exc:
-                    logger.warning(f"Could not ensure owner permissions: {exc}")
+                )
+                logger.info(f"Ensured owner {owner_id} has full permissions in group {target_chat_id}")
+            except Exception as exc:
+                logger.warning(f"Could not ensure owner permissions: {exc}")
 
+        if was_banned_or_restricted:
             # Notify owner about auto-restore (in DM if possible)
             try:
                 await bot.send_message(
@@ -926,10 +817,3 @@ async def ensure_owner_active(bot) -> None:
                 )
             except Exception:
                 pass
-
-        elif db_user.status != "VERIFIED":
-            # Ensure owner is at least verified
-            logger.info(f"Setting owner {owner_id} to VERIFIED status")
-            db_user.status = "VERIFIED"
-            db_user.rules_accepted = True
-            await session.commit()

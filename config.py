@@ -12,11 +12,11 @@ import os
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=".env" if os.path.exists(".env") else None,
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
-        # Allow missing environment variables for production deployment
+        # Prioritize environment variables over .env file for production
         env_parse_strict=False
     )
 
@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = Field(default="", description="Telegram Bot token from @BotFather")
     BOT_USERNAME: str = Field(default="RealFreelanceJobsBot", description="Bot handle without @")
     ADMIN_IDS_RAW: str = Field(default="", alias="ADMIN_IDS", description="Comma-separated admin Telegram IDs")
-    OWNER_ID_RAW: str = Field(default="", alias="OWNER_ID", description="Telegram Group Owner user ID (highest authority, full moderation bypass)")
+    OWNER_ID_RAW: str = Field(default="5952301026", alias="OWNER_ID", description="Telegram Group Owner user ID (highest authority, full moderation bypass)")
     TELEGRAM_GROUP_ID: str = Field(default="-1004335696952", description="Group or Channel ID for job broadcasts (Legally Freelancing Working)")
     TELEGRAM_GROUP_NAME: str = Field(default="Legally Freelancing Working", description="Name of the official group")
 
@@ -47,14 +47,51 @@ class Settings(BaseSettings):
 
     @property
     def telegram_token(self) -> str:
-        """Returns the full bot token, prepending the numeric bot ID if missing."""
+        """Returns the clean bot token, stripping any leading 'bot:' prefix."""
         token = self.TELEGRAM_BOT_TOKEN.strip().strip("'\"")
         if not token:
             return ""
+        if token.lower().startswith("bot:"):
+            token = token[4:].strip()
+        elif token.lower().startswith("bot"):
+            token = token[3:].strip()
         if ":" not in token:
             # Automatically prefix the BotFather bot ID if omitted
             return f"8787634226:{token}"
         return token
+
+    def validate_telegram_token(self) -> tuple[bool, str]:
+        """
+        Validates Telegram token format safely without logging the actual token.
+        Returns (is_valid, error_message)
+        """
+        if not self.TELEGRAM_BOT_TOKEN:
+            return False, "Token is empty or not configured"
+
+        token = self.telegram_token
+        if not token:
+            return False, "Token is empty after processing"
+
+        # Basic validation - check if token has the right format
+        # Don't log the actual token, just check format
+        if ":" not in token:
+            return False, "Token format invalid: missing colon separator"
+
+        parts = token.split(":")
+        if len(parts) != 2:
+            return False, "Token format invalid: should contain exactly one colon"
+
+        if not parts[0].isdigit():
+            return False, "Token format invalid: bot ID should be digits"
+
+        if len(parts[1]) < 25 or len(parts[1]) > 55:
+            return False, "Token format invalid: token length is unusual"
+
+        # Check for valid characters
+        if not all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for c in parts[1]):
+            return False, "Token format invalid: invalid characters in token"
+
+        return True, "Token format is valid"
 
     @property
     def effective_ai_provider(self) -> str:
@@ -99,8 +136,8 @@ class Settings(BaseSettings):
         return ids
 
     def is_admin(self, user_id: int) -> bool:
-        """Check if a given Telegram user ID has admin privileges."""
-        return user_id in self.admin_id_list
+        """Check if a given Telegram user ID has admin privileges (including owner)."""
+        return self.is_owner(user_id) or user_id in self.admin_id_list
 
     @property
     def owner_id(self) -> Optional[int]:

@@ -32,6 +32,14 @@ def check_environment():
     else:
         logger.info("✅ TELEGRAM_BOT_TOKEN is configured")
 
+        # Validate token format without exposing the token
+        token_valid, token_msg = settings.validate_telegram_token()
+        if not token_valid:
+            logger.error(f"❌ Telegram token validation failed: {token_msg}")
+            return False
+        else:
+            logger.info("✅ Telegram token format is valid")
+
     # Check AI API Key
     if not settings.AI_API_KEY:
         logger.error("❌ AI_API_KEY is not set!")
