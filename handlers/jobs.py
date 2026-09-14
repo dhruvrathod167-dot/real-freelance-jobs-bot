@@ -58,6 +58,21 @@ async def submit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if not user:
         return ConversationHandler.END
 
+    # IMPORTANT: Job submission must ONLY work in private chat with bot
+    chat = update.effective_chat
+    if chat.type != "private":
+        msg = (
+            "⚠️ <b>Job Submission in Private Chat Only</b>\n\n"
+            "To submit a job, please open a private chat with me (@BotUsername) and use /submit there.\n\n"
+            "This ensures your job details remain private until approved by moderators."
+        )
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(msg, parse_mode="HTML")
+        else:
+            await update.message.reply_text(msg, parse_mode="HTML")
+        return ConversationHandler.END
+
     # Check user verification status in DB
     async with get_db_session() as session:
         db_user = await get_user_by_id(session, user.id)
