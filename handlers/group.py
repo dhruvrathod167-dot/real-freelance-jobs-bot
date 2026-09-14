@@ -17,7 +17,7 @@ OWNER FULL BYPASS:
 import html
 import re
 import time
-from typing import Dict, Tuple, Set
+from typing import Dict, Tuple, Set, Optional
 from telegram import (
     Update,
     Chat,
