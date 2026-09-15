@@ -47,6 +47,15 @@ async def _delete_temporary_message(message, delay_seconds: int = 10) -> None:
         pass
 
 
+async def _safe_background_task(coro, task_name: str = "background_task"):
+    """Safely execute a background task without propagating exceptions to the main handler."""
+    try:
+        await coro
+    except Exception as exc:
+        logger.error(f"Background task '{task_name}' failed: {exc}")
+        # Don't propagate exceptions to the main handler
+
+
 async def _auto_approve_and_publish_job(
     context: ContextTypes.DEFAULT_TYPE,
     query,
@@ -373,7 +382,10 @@ async def confirm_job_submission_callback(update: Update, context: ContextTypes.
     acknowledgment_msg_obj = await query.message.edit_text(acknowledgment_msg, parse_mode="HTML")
     
     # Schedule auto-delete of acknowledgment message after 10 seconds
-    asyncio.create_task(_delete_temporary_message(acknowledgment_msg_obj, 10))
+    asyncio.create_task(_safe_background_task(
+        _delete_temporary_message(acknowledgment_msg_obj, 10),
+        "acknowledgment_message_delete"
+    ))
 
     # Run automated screening pipeline asynchronously
     try:

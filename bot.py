@@ -101,19 +101,40 @@ class ResilientHTTPXRequest(HTTPXRequest):
 
 async def global_error_handler(update: object, context) -> None:
     """Catches unhandled exceptions, suppresses transient polling network noise, and alerts user gracefully."""
+    from telegram.error import NetworkError, TimedOut
+    
+    # Log the exact exception type and details for debugging
+    exc_type = type(context.error).__name__
+    logger.error(f"Unhandled exception [{exc_type}]: {context.error}", exc_info=context.error)
+    
+    # Only handle actual network/timeout errors from Telegram API calls
     if isinstance(context.error, (NetworkError, TimedOut)):
         logger.warning(f"Handled transient network glitch: {context.error}")
         return
-
-    logger.error(f"Unhandled Telegram exception: {context.error}", exc_info=context.error)
-
+    
+    # For non-network errors, provide specific error messages instead of generic network glitch
     if isinstance(update, Update) and update.effective_message and update.effective_chat:
         try:
-            await update.effective_message.reply_text(
-                "⚠️ A temporary network glitch occurred while connecting to Telegram. Please resend your message or try again in a moment."
-            )
+            if "chat not found" in str(context.error).lower():
+                await update.effective_message.reply_text(
+                    "⚠️ Could not send your message. The group may have been deleted or I may not be a member there."
+                )
+            elif "forbidden" in str(context.error).lower():
+                await update.effective_message.reply_text(
+                    "⚠️ I don't have permission to send messages to that group. Please check my permissions."
+                )
+            elif "rate limit" in str(context.error).lower() or "retry after" in str(context.error).lower():
+                await update.effective_message.reply_text(
+                    "⚠️ Too many messages sent. Please wait a moment and try again."
+                )
+            else:
+                # Generic error message for other types of errors
+                await update.effective_message.reply_text(
+                    f"⚠️ An error occurred: {type(context.error).__name__}. Please try again later."
+                )
         except Exception:
-            pass
+            # If we can't send the error message, just log it
+            logger.warning(f"Could not send error notification to user: {context.error}")
 
 
 def build_bot_application() -> Application:
