@@ -211,8 +211,9 @@ async def call_gemini_api(payload_text: str) -> Optional[dict]:
         }
     }
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(url, json=body)
+    client = await get_http_client()
+    try:
+        resp = await client.post(url, json=body, timeout=12.0)
         if resp.status_code == 200:
             data = resp.json()
             try:
@@ -222,17 +223,34 @@ async def call_gemini_api(payload_text: str) -> Optional[dict]:
                 logger.error(f"Unexpected Gemini response structure: {data}")
         else:
             logger.warning(f"Gemini API returned HTTP {resp.status_code}: {resp.text}")
+    except Exception as exc:
+        logger.error(f"Gemini API call failed: {exc}")
     return None
 
 
+# Global HTTP client for connection reuse
+_http_client = None
+
+async def get_http_client() -> httpx.AsyncClient:
+    """Get or create a reusable HTTP client for connection pooling."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=15.0,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+            follow_redirects=True
+        )
+    return _http_client
+
 async def call_openai_api(payload_text: str) -> Optional[dict]:
-    """Queries OpenAI compatible endpoint."""
+    """Queries OpenAI compatible endpoint with optimized settings."""
     api_key = settings.AI_API_KEY.strip().strip("'\"")
     model = settings.effective_ai_model
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "User-Agent": "RealFreelanceJobs-Bot/1.0"
     }
     body = {
         "model": model,
@@ -241,17 +259,21 @@ async def call_openai_api(payload_text: str) -> Optional[dict]:
             {"role": "user", "content": f"Analyze this job posting:\n\n{payload_text}"}
         ],
         "temperature": 0.1,
-        "response_format": {"type": "json_object"}
+        "response_format": {"type": "json_object"},
+        "max_tokens": 1000  # Reasonable limit for scam detection
     }
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(url, headers=headers, json=body)
+    client = await get_http_client()
+    try:
+        resp = await client.post(url, headers=headers, json=body, timeout=12.0)
         if resp.status_code == 200:
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
             return extract_json_from_text(content)
         else:
             logger.warning(f"OpenAI API returned HTTP {resp.status_code}: {resp.text}")
+    except Exception as exc:
+        logger.error(f"OpenAI API call failed: {exc}")
     return None
 
 

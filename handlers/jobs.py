@@ -27,7 +27,7 @@ from database.crud import (
     create_job_submission,
     flag_user_suspicious,
 )
-from services.moderation import run_full_security_screening
+from services.moderation import run_full_security_screening, ModerationDecision
 from utils.logger import logger
 from utils.rate_limiter import submission_rate_limiter
 from utils.formatters import (
@@ -35,6 +35,56 @@ from utils.formatters import (
     get_risk_badge,
     COMMUNITY_SAFETY_DISCLAIMER,
 )
+
+
+async def _delete_temporary_message(message, delay_seconds: int = 10) -> None:
+    """Delete a temporary message after specified delay."""
+    try:
+        await asyncio.sleep(delay_seconds)
+        await message.delete()
+    except Exception:
+        # Ignore errors if message already deleted or chat issues
+        pass
+
+
+async def _auto_approve_and_publish_job(
+    context: ContextTypes.DEFAULT_TYPE,
+    query,
+    user,
+    draft: dict,
+    job_id: int,
+    decision
+) -> None:
+    """Automatically approve and publish a low-risk job to the target group."""
+    from handlers.admin import _execute_approval
+    
+    try:
+        # Update job status to APPROVED and publish to group
+        await _execute_approval(
+            job_id=job_id,
+            admin_id=0,  # 0 indicates auto-approval
+            context=context,
+            reply_target=query.message,
+            pending_message=query.message
+        )
+        
+        # Update user response to show successful publication
+        user_response = (
+            f"🎉 <b>Job Approved & Published!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Job ID:</b> #{job_id}\n"
+            f"<b>Risk Assessment:</b> {get_risk_badge(decision.final_score, decision.risk_level)}\n"
+            f"<b>Status:</b> ✅ Live in Community\n\n"
+            f"Your job passed all automated security checks and has been published to the community.\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{COMMUNITY_SAFETY_DISCLAIMER}"
+        )
+        
+        await query.message.edit_text(user_response, parse_mode="HTML")
+        
+    except Exception as exc:
+        logger.error(f"Auto-approval and publishing failed for job {job_id}: {exc}")
+        raise exc
 
 # Conversation States
 (
@@ -314,20 +364,42 @@ async def confirm_job_submission_callback(update: Update, context: ContextTypes.
         await query.message.edit_text("❌ Submission session expired. Please send /submit again.")
         return ConversationHandler.END
 
-    await query.message.edit_text("🔍 <i>Running multi-layer automated security checks... Please wait.</i>", parse_mode="HTML")
-
-    # Run automated screening pipeline
-    decision = await run_full_security_screening(
-        company_name=draft["company_name"],
-        company_website=draft["company_website"],
-        contact_email=draft["contact_email"],
-        job_title=draft["job_title"],
-        job_description=draft["job_description"],
-        payment_rate=draft["payment_rate"],
-        expected_work=draft["expected_work"],
-        country_region=draft["country_region"],
-        application_method=draft["application_method"],
+    # IMMEDIATE ACKNOWLEDGMENT - Don't block while running checks
+    acknowledgment_msg = (
+        "✅ <b>Job Submission Received!</b>\n\n"
+        "🔍 Your submission is being screened for security and quality checks.\n"
+        "You'll receive a notification once the review is complete."
     )
+    acknowledgment_msg_obj = await query.message.edit_text(acknowledgment_msg, parse_mode="HTML")
+    
+    # Schedule auto-delete of acknowledgment message after 10 seconds
+    asyncio.create_task(_delete_temporary_message(acknowledgment_msg_obj, 10))
+
+    # Run automated screening pipeline asynchronously
+    try:
+        decision = await run_full_security_screening(
+            company_name=draft["company_name"],
+            company_website=draft["company_website"],
+            contact_email=draft["contact_email"],
+            job_title=draft["job_title"],
+            job_description=draft["job_description"],
+            payment_rate=draft["payment_rate"],
+            expected_work=draft["expected_work"],
+            country_region=draft["country_region"],
+            application_method=draft["application_method"],
+        )
+    except Exception as exc:
+        logger.error(f"Security screening failed for job: {exc}")
+        # Fall back to manual review on any error
+        decision = ModerationDecision(
+            final_score=25.0,
+            risk_level="review",
+            action="hold_review",
+            all_flags=["System error during automated screening"],
+            reasons=["Automated checks failed, requiring manual review"],
+            ai_data={},
+            website_data={}
+        )
 
     # Persist job to database
     async with get_db_session() as session:
@@ -364,53 +436,65 @@ async def confirm_job_submission_callback(update: Update, context: ContextTypes.
 
     badge = get_risk_badge(decision.final_score, decision.risk_level)
 
-    # Alert administrators if configured
-    admin_review_card = format_admin_job_review(
-        job_id=job_id,
-        user_id=user.id,
-        username=user.username,
-        company_name=draft["company_name"],
-        job_title=draft["job_title"],
-        payment_rate=draft["payment_rate"],
-        country_region=draft["country_region"],
-        company_website=draft["company_website"],
-        contact_email=draft["contact_email"],
-        application_method=draft["application_method"],
-        expected_work=draft["expected_work"],
-        job_description=draft["job_description"],
-        risk_score=decision.final_score,
-        risk_level=decision.risk_level,
-        detected_flags=decision.all_flags,
-        ai_reasons=decision.reasons,
-    )
-
-    admin_keyboard = [
-        [
-            InlineKeyboardButton("✅ Approve & Publish", callback_data=f"adm_approve_{job_id}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"adm_reject_{job_id}"),
-        ],
-        [
-            InlineKeyboardButton("⭐ Feature", callback_data=f"adm_feature_{job_id}"),
-            InlineKeyboardButton("💎 Sponsor", callback_data=f"adm_sponsor_{job_id}"),
-        ],
-        [
-            InlineKeyboardButton("⚠️ Flag Suspicious", callback_data=f"adm_suspicious_{user.id}"),
-            InlineKeyboardButton("🚫 Ban Poster", callback_data=f"adm_ban_{user.id}"),
-        ]
-    ]
-
-    for admin_id in settings.admin_id_list:
+    # AUTOMATIC APPROVAL FOR LOW_RISK JOBS
+    if decision.action == "queue" and decision.risk_level == "low":
+        # Automatically approve and publish LOW_RISK jobs
         try:
-            sent_admin_msg = await context.bot.send_message(
-                chat_id=admin_id,
-                text=admin_review_card,
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(admin_keyboard)
-            )
-            from handlers.admin import record_pending_moderation_message
-            record_pending_moderation_message(job_id=job_id, chat_id=admin_id, message_id=sent_admin_msg.message_id)
+            await _auto_approve_and_publish_job(context, query, user, draft, job_id, decision)
+            return ConversationHandler.END
         except Exception as exc:
-            logger.warning(f"Could not deliver admin review alert to admin {admin_id}: {exc}")
+            logger.error(f"Auto-approval failed for job {job_id}: {exc}")
+            # Fall back to manual review
+            decision.action = "hold_review"
+    
+    # Alert administrators only for REVIEW_REQUIRED or HIGH_RISK jobs
+    if decision.action in ["hold_review", "block_review"]:
+        admin_review_card = format_admin_job_review(
+            job_id=job_id,
+            user_id=user.id,
+            username=user.username,
+            company_name=draft["company_name"],
+            job_title=draft["job_title"],
+            payment_rate=draft["payment_rate"],
+            country_region=draft["country_region"],
+            company_website=draft["company_website"],
+            contact_email=draft["contact_email"],
+            application_method=draft["application_method"],
+            expected_work=draft["expected_work"],
+            job_description=draft["job_description"],
+            risk_score=decision.final_score,
+            risk_level=decision.risk_level,
+            detected_flags=decision.all_flags,
+            ai_reasons=decision.reasons,
+        )
+
+        admin_keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve & Publish", callback_data=f"adm_approve_{job_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"adm_reject_{job_id}"),
+            ],
+            [
+                InlineKeyboardButton("⭐ Feature", callback_data=f"adm_feature_{job_id}"),
+                InlineKeyboardButton("💎 Sponsor", callback_data=f"adm_sponsor_{job_id}"),
+            ],
+            [
+                InlineKeyboardButton("⚠️ Flag Suspicious", callback_data=f"adm_suspicious_{user.id}"),
+                InlineKeyboardButton("🚫 Ban Poster", callback_data=f"adm_ban_{user.id}"),
+            ]
+        ]
+
+        for admin_id in settings.admin_id_list:
+            try:
+                sent_admin_msg = await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=admin_review_card,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(admin_keyboard)
+                )
+                from handlers.admin import record_pending_moderation_message
+                record_pending_moderation_message(job_id=job_id, chat_id=admin_id, message_id=sent_admin_msg.message_id)
+            except Exception as exc:
+                logger.warning(f"Could not deliver admin review alert to admin {admin_id}: {exc}")
 
     # Respond to user based on screening action
     if decision.action == "queue":
@@ -422,6 +506,50 @@ async def confirm_job_submission_callback(update: Update, context: ContextTypes.
             f"<b>Status:</b> ⏳ Moderation Queue\n\n"
             f"Your job passed automated security checks with low risk indicators. "
             f"A moderator will review and broadcast it to the verified community shortly.\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{COMMUNITY_SAFETY_DISCLAIMER}"
+        )
+    elif decision.action == "hold_review":
+        flags_text = "\n".join([f"• {html.escape(f)}" for f in decision.all_flags]) if decision.all_flags else "Standard safety review"
+        user_response = (
+            f"ℹ️ <b>Job Received - Verification Hold</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Job ID:</b> #{job_id}\n"
+            f"<b>Risk Assessment:</b> {badge}\n"
+            f"<b>Status:</b> 🔍 Pending Manual Verification\n\n"
+            f"Our automated security system detected one or more risk indicators:\n"
+            f"<i>{flags_text}</i>\n\n"
+            f"A community moderator will manually review the listing. "
+            f"If verified, your opportunity will be approved for publication.\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{COMMUNITY_SAFETY_DISCLAIMER}"
+        )
+    else:  # block_review
+        flags_text = "\n".join([f"• {html.escape(f)}" for f in decision.all_flags]) if decision.all_flags else "High security risk indicators detected"
+        user_response = (
+            f"⚠️ <b>Publication Blocked - Elevated Risk Indicators</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Job ID:</b> #{job_id}\n"
+            f"<b>Risk Assessment:</b> {badge}\n"
+            f"<b>Status:</b> 🛑 Held for Administrative Investigation\n\n"
+            f"The automated screening engine identified several high-risk indicators:\n"
+            f"<i>{flags_text}</i>\n\n"
+            f"To protect community members, publication has been blocked pending manual review. "
+            f"If you believe this detection was triggered in error, please contact community moderators.\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{COMMUNITY_SAFETY_DISCLAIMER}"
+        )
+
+    # Respond to user based on screening action
+    if decision.action == "queue":
+        # This case is now handled by auto-approval above
+        user_response = (
+            f"🎉 <b>Job Approved & Published!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Job ID:</b> #{job_id}\n"
+            f"<b>Risk Assessment:</b> {badge}\n"
+            f"<b>Status:</b> ✅ Live in Community\n\n"
+            f"Your job passed all automated security checks and has been published to the community.\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"{COMMUNITY_SAFETY_DISCLAIMER}"
         )

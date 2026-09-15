@@ -79,45 +79,42 @@ async def check_website(url: str, timeout: float = 6.0) -> WebsiteCheckResult:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
 
+    # Use global client for connection reuse
+    from .ai_analyzer import get_http_client
+    client = await get_http_client()
     try:
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            follow_redirects=True,
-            verify=True,
-            headers=headers
-        ) as client:
-            resp = await client.get(clean_url)
-            final_url = str(resp.url)
-            status_code = resp.status_code
+        resp = await client.get(clean_url, timeout=timeout)
+        final_url = str(resp.url)
+        status_code = resp.status_code
 
-            if status_code >= 400:
-                flags.append(f"Company website returned HTTP error status: {status_code}")
-                risk_points += 20.0
-                return WebsiteCheckResult(
-                    is_reachable=False,
-                    has_https=final_url.startswith("https://"),
-                    status_code=status_code,
-                    final_url=final_url,
-                    flags=flags,
-                    risk_points=risk_points,
-                )
-
-            # Check for parked domain or sales placeholders
-            body_sample = resp.text[:4000].lower()
-            for kw in PARKED_DOMAIN_KEYWORDS:
-                if kw in body_sample:
-                    flags.append(f"Website appears to be an inactive or parked placeholder ('{kw}')")
-                    risk_points += 30.0
-                    break
-
+        if status_code >= 400:
+            flags.append(f"Company website returned HTTP error status: {status_code}")
+            risk_points += 20.0
             return WebsiteCheckResult(
-                is_reachable=True,
+                is_reachable=False,
                 has_https=final_url.startswith("https://"),
                 status_code=status_code,
                 final_url=final_url,
                 flags=flags,
                 risk_points=risk_points,
             )
+
+        # Check for parked domain or sales placeholders
+        body_sample = resp.text[:4000].lower()
+        for kw in PARKED_DOMAIN_KEYWORDS:
+            if kw in body_sample:
+                flags.append(f"Website appears to be an inactive or parked placeholder ('{kw}')")
+                risk_points += 30.0
+                break
+
+        return WebsiteCheckResult(
+            is_reachable=True,
+            has_https=final_url.startswith("https://"),
+            status_code=status_code,
+            final_url=final_url,
+            flags=flags,
+            risk_points=risk_points,
+        )
 
     except httpx.ConnectTimeout:
         logger.warning(f"Connection timed out when checking website: {clean_url}")

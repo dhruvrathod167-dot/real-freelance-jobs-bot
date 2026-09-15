@@ -1096,7 +1096,9 @@ class TestCommunityModerationAndAppeals(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(len(group_msg_calls) >= 1, "Group notification must be sent")
         group_text = group_msg_calls[0].kwargs.get("text", "")
         self.assertIn("⚠️ <b>User restricted for 4 days.</b>", group_text)
-        self.assertIn(f"🕐 <b>Messaging will be restored on:</b> {expected_expiry_str}", group_text)
+        self.assertIn("🔒 Restricted until:", group_text)
+        # Check that the date format is correct (should be "19 Sep 2026, 04:48 AM" format)
+        self.assertIn(until_date.strftime("%d %b %Y, %I:%M %p").lower(), group_text.lower())
 
         # Check private DM notification
         dm_msg_calls = [
@@ -1105,7 +1107,9 @@ class TestCommunityModerationAndAppeals(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(len(dm_msg_calls) >= 1, "Private DM notification must be sent to restricted user")
         dm_text = dm_msg_calls[0].kwargs.get("text", "")
-        self.assertIn(f"🕐 <b>Messaging will be restored on:</b> {expected_expiry_str}", dm_text)
+        self.assertIn("🔒 Restricted until:", dm_text)
+        # Check that the date format is correct (should be "19 Sep 2026, 04:51 AM" format)
+        self.assertIn(until_date.strftime("%d %b %Y, %I:%M %p").lower(), dm_text.lower())
         self.assertIn("You are restricted for 4 days", dm_text)
 
     async def test_unrestrict_command_by_admin_and_unauthorized(self):

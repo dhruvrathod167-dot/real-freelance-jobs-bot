@@ -4,6 +4,7 @@ Orchestrates website checks, domain integrity, heuristic pattern detection,
 and AI analysis to produce the final calibrated Risk Score and automatic action.
 """
 
+import asyncio
 from typing import Dict, Any, List
 from services.website_checker import check_website
 from services.domain_checker import check_domain_integrity
@@ -60,55 +61,103 @@ async def run_full_security_screening(
     2. Domain integrity & email mismatch
     3. Content heuristic pattern detection
     4. AI contextual scam evaluation
+    
+    Runs checks in parallel for maximum performance.
     """
     logger.info(f"Starting automated security screening for job: '{job_title}' at '{company_name}'")
     all_flags: List[str] = []
     reasons: List[str] = []
     total_score = 0.0
 
-    # 1. Website reachability & HTTPS check
-    web_res = await check_website(company_website)
-    if web_res.flags:
-        all_flags.extend(web_res.flags)
-        total_score += web_res.risk_points
+    # Run checks in parallel for maximum performance
+    try:
+        # Execute all checks concurrently
+        web_task = check_website(company_website)
+        ai_task = analyze_job_with_ai(
+            company_name=company_name,
+            job_title=job_title,
+            job_description=job_description,
+            payment_rate=payment_rate,
+            expected_work=expected_work,
+            application_method=application_method,
+            company_website=company_website,
+            contact_email=contact_email,
+            heuristic_flags=[]
+        )
+        
+        # Run website and AI checks in parallel
+        web_res, ai_res = await asyncio.gather(
+            web_task,
+            ai_task,
+            return_exceptions=True
+        )
+        
+        # Run heuristic check separately (it's synchronous)
+        try:
+            heuristic_res = scan_job_heuristics(
+                job_title=job_title,
+                job_description=job_description,
+                payment_rate=payment_rate,
+                expected_work=expected_work,
+                application_method=application_method,
+            )
+        except Exception as exc:
+            logger.error(f"Heuristic scan failed: {exc}")
+            heuristic_res = type('obj', (object,), {'flags': ['Heuristic check failed'], 'risk_score': 10.0, 'reasons': ['System error'], 'strong_indicator_count': 0, 'medium_indicator_count': 0})()
+        
+        # Handle results (check for exceptions)
+        if isinstance(web_res, Exception):
+            logger.error(f"Website check failed: {web_res}")
+            web_res = type('obj', (object,), {'flags': ['Website check failed'], 'risk_points': 10.0})()
+        else:
+            if web_res.flags:
+                all_flags.extend(web_res.flags)
+                total_score += web_res.risk_points
 
-    # 2. Domain & Email integrity check
-    dom_flags, dom_risk = check_domain_integrity(company_website, contact_email, company_name)
-    if dom_flags:
-        all_flags.extend(dom_flags)
-        total_score += dom_risk
+        if isinstance(heuristic_res, Exception):
+            logger.error(f"Heuristic scan failed: {heuristic_res}")
+            heuristic_res = type('obj', (object,), {'flags': ['Heuristic check failed'], 'risk_score': 10.0, 'reasons': ['System error'], 'strong_indicator_count': 0, 'medium_indicator_count': 0})()
+        else:
+            if heuristic_res.flags:
+                all_flags.extend(heuristic_res.flags)
+                total_score += heuristic_res.risk_score
+                reasons.extend(heuristic_res.reasons)
 
-    # 3. Content heuristic scan
-    heuristic_res = scan_job_heuristics(
-        job_title=job_title,
-        job_description=job_description,
-        payment_rate=payment_rate,
-        expected_work=expected_work,
-        application_method=application_method,
-    )
-    if heuristic_res.flags:
-        all_flags.extend(heuristic_res.flags)
-        total_score += heuristic_res.risk_score
-        reasons.extend(heuristic_res.reasons)
+        if isinstance(ai_res, Exception):
+            logger.error(f"AI analysis failed: {ai_res}")
+            # AI fallback: treat as uncertain and require manual review
+            ai_res = type('obj', (object,), {'flags': ['AI analysis failed'], 'risk_score': 25.0, 'reasons': ['AI service unavailable, requiring manual review']})()
+        else:
+            if ai_res.flags:
+                for f in ai_res.flags:
+                    if f not in all_flags:
+                        all_flags.append(f)
+            if ai_res.reasons:
+                reasons.extend(ai_res.reasons)
 
-    # 4. AI contextual analysis
-    ai_res = await analyze_job_with_ai(
-        company_name=company_name,
-        job_title=job_title,
-        job_description=job_description,
-        payment_rate=payment_rate,
-        expected_work=expected_work,
-        application_method=application_method,
-        company_website=company_website,
-        contact_email=contact_email,
-        heuristic_flags=all_flags
-    )
-    if ai_res.flags:
-        for f in ai_res.flags:
-            if f not in all_flags:
-                all_flags.append(f)
-    if ai_res.reasons:
-        reasons.extend(ai_res.reasons)
+    except Exception as exc:
+        logger.error(f"Parallel screening failed: {exc}")
+        # Fallback to simple screening on major failure
+        return ModerationDecision(
+            final_score=25.0,
+            risk_level="review",
+            action="hold_review",
+            all_flags=["System error during automated screening"],
+            reasons=["Automated checks failed, requiring manual review"],
+            ai_data={},
+            website_data={}
+        )
+
+    # 2. Domain & Email integrity check (still sequential as it's lightweight)
+    try:
+        dom_flags, dom_risk = check_domain_integrity(company_website, contact_email, company_name)
+        if dom_flags:
+            all_flags.extend(dom_flags)
+            total_score += dom_risk
+    except Exception as exc:
+        logger.error(f"Domain check failed: {exc}")
+        all_flags.append("Domain validation failed")
+        total_score += 10.0
 
     # Weight synthesized final score (blend heuristics + website + AI)
     # If heuristics found strong fraud indicators or combinations, ensure score is not diluted
