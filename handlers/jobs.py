@@ -5,6 +5,7 @@ validates inputs, initiates the automated screening engine, stores the submissio
 and routes alerts to administrators.
 """
 
+import asyncio
 import html
 import warnings
 from telegram.warnings import PTBUserWarning

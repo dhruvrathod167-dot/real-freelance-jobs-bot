@@ -163,11 +163,18 @@ async def run_full_security_screening(
     # If heuristics found strong fraud indicators or combinations, ensure score is not diluted
     ai_weight = 0.4
     rule_weight = 0.6
-    blended_score = (total_score * rule_weight) + (ai_res.risk_score * ai_weight)
+    
+    # Check if ai_res is a valid result object or an exception
+    ai_score = getattr(ai_res, 'risk_score', 25.0) if not isinstance(ai_res, Exception) else 25.0
+    blended_score = (total_score * rule_weight) + (ai_score * ai_weight)
 
+    # Check if heuristic_res has the required attributes
+    strong_indicators = getattr(heuristic_res, 'strong_indicator_count', 0)
+    heuristic_score = getattr(heuristic_res, 'risk_score', 0.0)
+    
     # If heuristic scanning detected strong indicators or combinations, preserve the high score
-    if heuristic_res.strong_indicator_count >= 1 or heuristic_res.risk_score >= 50.0:
-        final_score = max(blended_score, heuristic_res.risk_score)
+    if strong_indicators >= 1 or heuristic_score >= 50.0:
+        final_score = max(blended_score, heuristic_score)
     else:
         final_score = blended_score
 
@@ -196,12 +203,16 @@ async def run_full_security_screening(
         f"Screening complete: Score={final_score:.1f}, Level={risk_level}, Flags={len(unique_flags)}, Action={action}"
     )
 
+    # Safely get AI and website data
+    ai_data = ai_res.to_dict() if hasattr(ai_res, 'to_dict') and not isinstance(ai_res, Exception) else {}
+    website_data = web_res.to_dict() if hasattr(web_res, 'to_dict') and not isinstance(web_res, Exception) else {}
+    
     return ModerationDecision(
         final_score=round(final_score, 1),
         risk_level=risk_level,
         action=action,
         all_flags=unique_flags,
         reasons=reasons,
-        ai_data=ai_res.to_dict(),
-        website_data=web_res.to_dict(),
+        ai_data=ai_data,
+        website_data=website_data,
     )
