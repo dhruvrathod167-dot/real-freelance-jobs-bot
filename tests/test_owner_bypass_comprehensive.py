@@ -225,7 +225,10 @@ class TestOwnerFullBypass(unittest.IsolatedAsyncioTestCase):
             mock_get_user.return_value = mock_db_user
             
             # Simulate owner joining
-            await onboard_new_member(chat, user, context)
+            update = MagicMock()
+            update.effective_user = user
+            update.effective_chat = chat
+            await onboard_new_member(update, chat, user, context)
         
         # Owner should receive a special welcome message
         context.bot.send_message.assert_called_once()

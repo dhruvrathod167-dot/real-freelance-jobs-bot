@@ -218,3 +218,16 @@ class Appeal(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     user: Mapped["User"] = relationship("User", back_populates="appeals")
+
+
+class VerificationMessage(Base):
+    """Tracks monthly verification message count to prevent spam."""
+    __tablename__ = "verification_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    message_type: Mapped[str] = mapped_column(String(32), nullable=False)  # "welcome", "verification"
+    calendar_month: Mapped[int] = mapped_column(Integer, nullable=False)  # Year (YYYY) * 100 + Month (1-12)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    user: Mapped["User"] = relationship("User")

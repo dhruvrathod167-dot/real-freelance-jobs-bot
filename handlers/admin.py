@@ -29,6 +29,19 @@ from database.crud import (
     unban_and_restore_user,
 )
 from utils.logger import logger
+from utils.security import (
+    require_admin_handler,
+    log_security_event,
+    validate_admin_callback,
+    validate_job_id,
+    validate_user_id
+)
+from utils.error_handler import (
+    handle_error,
+    create_user_safe_error_message,
+    handle_telegram_error,
+    secure_error_handler
+)
 
 
 def format_until_date(until_date) -> str:
@@ -40,7 +53,7 @@ def format_until_date(until_date) -> str:
         until_date = until_date.replace(tzinfo=timezone.utc)
     
     return f"🔒 Restricted until: {until_date.strftime('%d %b %Y, %I:%M %p')}"
-from utils.rate_limiter import submission_rate_limiter
+from utils.rate_limiter import rate_limiter_manager
 from utils.formatters import (
     format_job_card,
     format_admin_job_review,
@@ -88,6 +101,7 @@ def is_authorized_admin(user_id: int) -> bool:
     return settings.is_admin(user_id)
 
 
+@require_admin_handler
 async def admin_dashboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles /admin command: displays overview dashboard."""
     user = update.effective_user
@@ -225,11 +239,12 @@ async def reject_job_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await _execute_rejection(job_id=job_id, admin_id=user.id, reason=reason, context=context, reply_target=update.message)
 
 
+@secure_error_handler("ban_user")
 async def ban_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles /ban <user_id> [reason]."""
     user = update.effective_user
     if not user or not is_authorized_admin(user.id):
-        await update.message.reply_text("⛔ Unauthorized.")
+        await update.message.reply_text("⛔ <i>Access restricted to authorized administrators.</i>", parse_mode="HTML")
         return
 
     if not context.args or not context.args[0].isdigit():
@@ -239,29 +254,34 @@ async def ban_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     target_id = int(context.args[0])
     reason = " ".join(context.args[1:]) if len(context.args) > 1 else "Safety violations / fraudulent activity."
 
-    async with get_db_session() as session:
-        updated = await set_user_status(session, user_id=target_id, status="BANNED", flag_notes=reason, actor_id=user.id)
+    try:
+        async with get_db_session() as session:
+            updated = await set_user_status(session, user_id=target_id, status="BANNED", flag_notes=reason, actor_id=user.id)
 
-    if updated:
-        await update.message.reply_text(f"🚫 User <code>{target_id}</code> has been banned. Reason: {html.escape(reason)}", parse_mode="HTML")
-        try:
-            restriction_expiry = format_until_date(None)  # Permanent ban
-            await context.bot.send_message(
-                chat_id=target_id,
-                text=f"🚫 <b>Account Suspended</b>\n{restriction_expiry}\n\nYour account has been restricted from participating in Real Freelance Jobs.\nReason: {html.escape(reason)}",
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
-    else:
-        await update.message.reply_text("❌ User not found in database.")
+        if updated:
+            await update.message.reply_text(f"🚫 User <code>{target_id}</code> has been banned. Reason: {html.escape(reason)}", parse_mode="HTML")
+            try:
+                restriction_expiry = format_until_date(None)  # Permanent ban
+                await context.bot.send_message(
+                    chat_id=target_id,
+                    text=f"🚫 <b>Account Suspended</b>\n{restriction_expiry}\n\nYour account has been restricted from participating in Real Freelance Jobs.\nReason: {html.escape(reason)}",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        else:
+            await update.message.reply_text("❌ User not found in database.")
+            
+    except AuthorizationError as e:
+        await update.message.reply_text(f"⛔ <i>{str(e)}</i>", parse_mode="HTML")
+        log_security_event("BAN_ATTEMPT_FAILED", user.id, {"target_id": target_id, "reason": "Authorization failed"})
 
 
 async def unban_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles /unban <user_id>: unbans user, clears restrictions, restores group permissions."""
     user = update.effective_user
     if not user or not is_authorized_admin(user.id):
-        await update.message.reply_text("⛔ Unauthorized.")
+        await update.message.reply_text("⛔ <i>Access restricted to authorized administrators.</i>", parse_mode="HTML")
         return
 
     if not context.args or not context.args[0].isdigit():
@@ -270,41 +290,46 @@ async def unban_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     target_id = int(context.args[0])
 
-    async with get_db_session() as session:
-        updated = await unban_and_restore_user(session, user_id=target_id, actor_id=user.id, notes="Unbanned by admin command")
+    try:
+        async with get_db_session() as session:
+            updated = await unban_and_restore_user(session, user_id=target_id, actor_id=user.id, notes="Unbanned by admin command")
 
-    if updated:
-        target_chat_id = settings.effective_group_id
-        if target_chat_id:
-            try:
-                await context.bot.unban_chat_member(chat_id=target_chat_id, user_id=target_id, only_if_banned=False)
-                await context.bot.restrict_chat_member(
-                    chat_id=target_chat_id,
-                    user_id=target_id,
-                    permissions=ChatPermissions(
-                        can_send_messages=True,
-                        can_send_polls=True,
-                        can_send_other_messages=True,
-                        can_add_web_page_previews=True,
+        if updated:
+            target_chat_id = settings.effective_group_id
+            if target_chat_id:
+                try:
+                    await context.bot.unban_chat_member(chat_id=target_chat_id, user_id=target_id, only_if_banned=False)
+                    await context.bot.restrict_chat_member(
+                        chat_id=target_chat_id,
+                        user_id=target_id,
+                        permissions=ChatPermissions(
+                            can_send_messages=True,
+                            can_send_polls=True,
+                            can_send_other_messages=True,
+                            can_add_web_page_previews=True,
+                        )
                     )
-                )
-            except Exception as exc:
-                logger.warning(f"Could not unban user {target_id} in Telegram group: {exc}")
+                except Exception as exc:
+                    logger.warning(f"Could not unban user {target_id} in Telegram group: {exc}")
 
-        await update.message.reply_text(
-            f"✅ User <code>{target_id}</code> unbanned and restored to <b>VERIFIED</b> in {html.escape(settings.TELEGRAM_GROUP_NAME)}.",
-            parse_mode="HTML"
-        )
-        try:
-            await context.bot.send_message(
-                chat_id=target_id,
-                text=f"🎉 <b>Account Restored</b>\nYour account has been unbanned by an administrator. You can now participate normally in <b>{html.escape(settings.TELEGRAM_GROUP_NAME)}</b>.",
+            await update.message.reply_text(
+                f"✅ User <code>{target_id}</code> unbanned and restored to <b>VERIFIED</b> in {html.escape(settings.TELEGRAM_GROUP_NAME)}.",
                 parse_mode="HTML"
             )
-        except Exception:
-            pass
-    else:
-        await update.message.reply_text("❌ User not found.")
+            try:
+                await context.bot.send_message(
+                    chat_id=target_id,
+                    text=f"🎉 <b>Account Restored</b>\nYour account has been unbanned by an administrator. You can now participate normally in <b>{html.escape(settings.TELEGRAM_GROUP_NAME)}</b>.",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        else:
+            await update.message.reply_text("❌ User not found.")
+            
+    except Exception as e:
+        logger.error(f"Error in unban_user_handler: {e}")
+        await update.message.reply_text("⚠️ <i>An internal error occurred.</i>", parse_mode="HTML")
 
 
 async def unrestrict_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -615,15 +640,26 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
     elif data.startswith("adm_ban_"):
         target_id = int(data.split("_")[2])
         await query.answer()
-        async with get_db_session() as session:
-            await set_user_status(session, user_id=target_id, status="BANNED", flag_notes="Banned via inline admin button", actor_id=user.id)
-        await query.message.reply_text(f"🚫 User <code>{target_id}</code> was banned.", parse_mode="HTML")
+        try:
+            async with get_db_session() as session:
+                await set_user_status(session, user_id=target_id, status="BANNED", flag_notes="Banned via inline admin button", actor_id=user.id)
+            await query.message.reply_text(f"🚫 User <code>{target_id}</code> was banned.", parse_mode="HTML")
+        except AuthorizationError as e:
+            await query.message.reply_text(f"⛔ <i>{str(e)}</i>", parse_mode="HTML")
+            log_security_event("BAN_ATTEMPT_FAILED", user.id, {"target_id": target_id, "reason": "Authorization failed"})
+        except Exception as e:
+            logger.error(f"Error in ban callback: {e}")
+            await query.message.reply_text("⚠️ <i>An internal error occurred.</i>", parse_mode="HTML")
     elif data.startswith("adm_unban_"):
         target_id = int(data.split("_")[2])
         await query.answer()
-        async with get_db_session() as session:
-            await set_user_status(session, user_id=target_id, status="VERIFIED", flag_notes="Unbanned by admin", actor_id=user.id)
-        await query.message.reply_text(f"✅ User <code>{target_id}</code> was restored to VERIFIED.", parse_mode="HTML")
+        try:
+            async with get_db_session() as session:
+                await set_user_status(session, user_id=target_id, status="VERIFIED", flag_notes="Unbanned by admin", actor_id=user.id)
+            await query.message.reply_text(f"✅ User <code>{target_id}</code> was restored to VERIFIED.", parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Error in unban callback: {e}")
+            await query.message.reply_text("⚠️ <i>An internal error occurred.</i>", parse_mode="HTML")
     elif data.startswith("adm_feature_"):
         job_id = int(data.split("_")[2])
         await query.answer()
@@ -647,100 +683,115 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
     elif data.startswith("adm_suspicious_"):
         target_id = int(data.split("_")[2])
         await query.answer()
-        async with get_db_session() as session:
-            await flag_user_suspicious(session, user_id=target_id, reason="Flagged via inline admin button", actor_id=user.id)
-        await query.message.reply_text(f"⚠️ User <code>{target_id}</code> flagged as SUSPICIOUS.", parse_mode="HTML")
+        try:
+            async with get_db_session() as session:
+                await flag_user_suspicious(session, user_id=target_id, reason="Flagged via inline admin button", actor_id=user.id)
+            await query.message.reply_text(f"⚠️ User <code>{target_id}</code> flagged as SUSPICIOUS.", parse_mode="HTML")
+        except AuthorizationError as e:
+            await query.message.reply_text(f"⛔ <i>{str(e)}</i>", parse_mode="HTML")
+            log_security_event("FLAG_ATTEMPT_FAILED", user.id, {"target_id": target_id, "reason": "Authorization failed"})
+        except Exception as e:
+            logger.error(f"Error in suspicious callback: {e}")
+            await query.message.reply_text("⚠️ <i>An internal error occurred.</i>", parse_mode="HTML")
     elif data.startswith("adm_appeal_unban_"):
         appeal_id = int(data.split("_")[3])
         await query.answer()
-        async with get_db_session() as session:
-            appeal = await get_appeal_by_id(session, appeal_id)
-            if not appeal or appeal.status != "PENDING":
-                await query.message.reply_text("❌ Appeal not found or already processed.")
-                return
-            await resolve_appeal(session, appeal_id=appeal_id, status="APPROVED", admin_id=user.id, notes="Approved by admin via inline button")
-            await unban_and_restore_user(session, user_id=appeal.user_id, actor_id=user.id, notes=f"Unbanned via Appeal #{appeal_id}")
-            appeal_user_id = appeal.user_id
+        try:
+            async with get_db_session() as session:
+                appeal = await get_appeal_by_id(session, appeal_id)
+                if not appeal or appeal.status != "PENDING":
+                    await query.message.reply_text("❌ Appeal not found or already processed.")
+                    return
+                await resolve_appeal(session, appeal_id=appeal_id, status="APPROVED", admin_id=user.id, notes="Approved by admin via inline button")
+                await unban_and_restore_user(session, user_id=appeal.user_id, actor_id=user.id, notes=f"Unbanned via Appeal #{appeal_id}")
+                appeal_user_id = appeal.user_id
 
-        target_chat_id = settings.effective_group_id
-        if target_chat_id:
-            try:
-                await context.bot.unban_chat_member(chat_id=target_chat_id, user_id=appeal_user_id, only_if_banned=False)
-                await context.bot.restrict_chat_member(
-                    chat_id=target_chat_id,
-                    user_id=appeal_user_id,
-                    permissions=ChatPermissions(
-                        can_send_messages=True,
-                        can_send_polls=True,
-                        can_send_other_messages=True,
-                        can_add_web_page_previews=True,
+            target_chat_id = settings.effective_group_id
+            if target_chat_id:
+                try:
+                    await context.bot.unban_chat_member(chat_id=target_chat_id, user_id=appeal_user_id, only_if_banned=False)
+                    await context.bot.restrict_chat_member(
+                        chat_id=target_chat_id,
+                        user_id=appeal_user_id,
+                        permissions=ChatPermissions(
+                            can_send_messages=True,
+                            can_send_polls=True,
+                            can_send_other_messages=True,
+                            can_add_web_page_previews=True,
+                        )
                     )
-                )
-            except Exception as exc:
-                logger.warning(f"Could not unban user {appeal_user_id} in group: {exc}")
+                except Exception as exc:
+                    logger.warning(f"Could not unban user {appeal_user_id} in group: {exc}")
 
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
 
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=f"✅ <b>Appeal #{appeal_id} APPROVED!</b> User <code>{appeal_user_id}</code> has been unbanned and restored to <b>VERIFIED</b> in {html.escape(settings.TELEGRAM_GROUP_NAME)}.",
-            parse_mode="HTML"
-        )
-
-        # Notify user in DM
-        try:
             await context.bot.send_message(
-                chat_id=appeal_user_id,
-                text=(
-                    f"🎉 <b>Appeal Approved!</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"Your appeal (ID #{appeal_id}) has been reviewed and <b>approved</b> by an administrator.\n"
-                    f"Your account and sending permissions have been fully restored in <b>{html.escape(settings.TELEGRAM_GROUP_NAME)}</b>.\n\n"
-                    f"Please review /rules and keep future communications professional."
-                ),
+                chat_id=user.id,
+                text=f"✅ <b>Appeal #{appeal_id} APPROVED!</b> User <code>{appeal_user_id}</code> has been unbanned and restored to <b>VERIFIED</b> in {html.escape(settings.TELEGRAM_GROUP_NAME)}.",
                 parse_mode="HTML"
             )
-        except Exception:
-            pass
+
+            # Notify user in DM
+            try:
+                await context.bot.send_message(
+                    chat_id=appeal_user_id,
+                    text=(
+                        f"🎉 <b>Appeal Approved!</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Your appeal (ID #{appeal_id}) has been reviewed and <b>approved</b> by an administrator.\n"
+                        f"Your account and sending permissions have been fully restored in <b>{html.escape(settings.TELEGRAM_GROUP_NAME)}</b>.\n\n"
+                        f"Please review /rules and keep future communications professional."
+                    ),
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Error in appeal unban callback: {e}")
+            await query.message.reply_text("⚠️ <i>An internal error occurred.</i>", parse_mode="HTML")
     elif data.startswith("adm_appeal_reject_"):
         appeal_id = int(data.split("_")[3])
         await query.answer()
-        async with get_db_session() as session:
-            appeal = await get_appeal_by_id(session, appeal_id)
-            if not appeal or appeal.status != "PENDING":
-                await query.message.reply_text("❌ Appeal not found or already processed.")
-                return
-            await resolve_appeal(session, appeal_id=appeal_id, status="REJECTED", admin_id=user.id, notes="Rejected by admin via inline button")
-            appeal_user_id = appeal.user_id
-
         try:
-            await query.message.delete()
-        except Exception:
-            pass
+            async with get_db_session() as session:
+                appeal = await get_appeal_by_id(session, appeal_id)
+                if not appeal or appeal.status != "PENDING":
+                    await query.message.reply_text("❌ Appeal not found or already processed.")
+                    return
+                await resolve_appeal(session, appeal_id=appeal_id, status="REJECTED", admin_id=user.id, notes="Rejected by admin via inline button")
+                appeal_user_id = appeal.user_id
 
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=f"🚫 <b>Appeal #{appeal_id} REJECTED.</b> Permanent ban maintained for user <code>{appeal_user_id}</code>.",
-            parse_mode="HTML"
-        )
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
 
-        # Notify user in DM
-        try:
             await context.bot.send_message(
-                chat_id=appeal_user_id,
-                text=(
-                    f"⚖️ <b>Appeal Decision: Not Approved</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"Your appeal (ID #{appeal_id}) has been reviewed by administrators.\n"
-                    f"After consideration of the violation history, the penalty will remain in effect."
-                ),
+                chat_id=user.id,
+                text=f"🚫 <b>Appeal #{appeal_id} REJECTED.</b> Permanent ban maintained for user <code>{appeal_user_id}</code>.",
                 parse_mode="HTML"
             )
-        except Exception:
-            pass
+
+            # Notify user in DM
+            try:
+                await context.bot.send_message(
+                    chat_id=appeal_user_id,
+                    text=(
+                        f"⚖️ <b>Appeal Decision: Not Approved</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Your appeal (ID #{appeal_id}) has been reviewed by administrators.\n"
+                        f"After consideration of the violation history, the penalty will remain in effect."
+                    ),
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Error in appeal reject callback: {e}")
+            await query.message.reply_text("⚠️ <i>An internal error occurred.</i>", parse_mode="HTML")
 
 
 async def _execute_approval(
@@ -890,7 +941,7 @@ async def _execute_approval(
                 await context.bot.send_message(chat_id=admin_id, text=success_msg, parse_mode="HTML")
 
             # Reset submitter rate limit and allow them to start another /submit immediately
-            submission_rate_limiter.reset(job.user_id)
+            await rate_limiter_manager.reset_user_limits(job.user_id)
 
             # Notify submitter of approval & publication
             try:
@@ -994,7 +1045,7 @@ async def _execute_rejection(
         await context.bot.send_message(chat_id=admin_id, text=admin_msg, parse_mode="HTML")
 
     # 3. Reset submitter rate limit and allow them to start another /submit immediately
-    submission_rate_limiter.reset(job.user_id)
+    await rate_limiter_manager.reset_user_limits(job.user_id)
 
     # 4. Inform submitter courteously without defamatory claims
     try:

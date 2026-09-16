@@ -25,6 +25,7 @@ from telegram.request import HTTPXRequest
 from config import settings
 from database.db import init_db, close_db
 from utils.logger import logger
+from utils.error_handler import handle_error
 
 # Handlers
 from handlers.start import (
@@ -69,6 +70,7 @@ from handlers.group import (
     auto_restore_expired_restrictions,
     ensure_owner_active,
 )
+from handlers.direct_posts import handle_direct_job_post, send_verification_message_if_allowed
 from services.ai_analyzer import verify_ai_connection
 from api.server import app as fastapi_app
 
@@ -102,6 +104,7 @@ class ResilientHTTPXRequest(HTTPXRequest):
 async def global_error_handler(update: object, context) -> None:
     """Catches unhandled exceptions, suppresses transient polling network noise, and alerts user gracefully."""
     from telegram.error import NetworkError, TimedOut
+    from utils.error_handler import handle_telegram_error
     
     # Log the exact exception type and details for debugging
     exc_type = type(context.error).__name__
@@ -112,29 +115,20 @@ async def global_error_handler(update: object, context) -> None:
         logger.warning(f"Handled transient network glitch: {context.error}")
         return
     
-    # For non-network errors, provide specific error messages instead of generic network glitch
-    if isinstance(update, Update) and update.effective_message and update.effective_chat:
+    # For non-network errors, use secure error handling
+    if isinstance(update, Update):
         try:
-            if "chat not found" in str(context.error).lower():
-                await update.effective_message.reply_text(
-                    "⚠️ Could not send your message. The group may have been deleted or I may not be a member there."
-                )
-            elif "forbidden" in str(context.error).lower():
-                await update.effective_message.reply_text(
-                    "⚠️ I don't have permission to send messages to that group. Please check my permissions."
-                )
-            elif "rate limit" in str(context.error).lower() or "retry after" in str(context.error).lower():
-                await update.effective_message.reply_text(
-                    "⚠️ Too many messages sent. Please wait a moment and try again."
-                )
-            else:
-                # Generic error message for other types of errors
-                await update.effective_message.reply_text(
-                    f"⚠️ An error occurred: {type(context.error).__name__}. Please try again later."
-                )
-        except Exception:
-            # If we can't send the error message, just log it
-            logger.warning(f"Could not send error notification to user: {context.error}")
+            await handle_telegram_error(update, context.error, context.error.__dict__ if hasattr(context.error, '__dict__') else {})
+        except Exception as e:
+            logger.error(f"Error in secure error handler: {e}")
+            # Fallback to basic error handling
+            try:
+                if update.effective_message:
+                    await update.effective_message.reply_text(
+                        "⚠️ A technical error occurred. Please try again later."
+                    )
+            except Exception:
+                pass
 
 
 def build_bot_application() -> Application:
@@ -228,6 +222,14 @@ def build_bot_application() -> Application:
         MessageHandler(
             filters.ChatType.GROUPS & filters.UpdateType.EDITED_MESSAGE & (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
             group_message_moderation_handler
+        )
+    )
+    
+    # Direct job post detection handler
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
+            handle_direct_job_post
         )
     )
 

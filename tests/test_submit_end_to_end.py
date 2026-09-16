@@ -48,6 +48,7 @@ class TestSubmitEndToEnd:
         update.effective_chat = MagicMock(spec=Chat)
         update.effective_chat.type = chat_type if isinstance(chat_type, str) else 'private'
         
+        # Add message attribute for submit_start function
         update.message = MagicMock()
         update.message.text = ""
         update.message.reply_text = AsyncMock()
@@ -101,6 +102,7 @@ class TestSubmitEndToEnd:
         mock_user = MagicMock()
         mock_user.status = "VERIFIED"
         mock_user.rules_accepted = True
+        mock_user.is_owner = False  # Add this to bypass owner checks
         mock_get_user.return_value = mock_user
         
         # Mock the database session
@@ -109,7 +111,8 @@ class TestSubmitEndToEnd:
         mock_session_factory.return_value.__aenter__.return_value = mock_session
         mock_session_factory.return_value.__aexit__.return_value = None
         
-        with patch('handlers.jobs.get_db_session', mock_session_factory):
+        with patch('handlers.jobs.get_db_session', mock_session_factory), \
+             patch('handlers.jobs.submission_rate_limiter') as mock_rate_limiter:
             mock_rate_limiter.is_allowed.return_value = True
             mock_rate_limiter.reset = AsyncMock()
         
@@ -120,7 +123,7 @@ class TestSubmitEndToEnd:
             risk_level="low",
             action="queue",
             all_flags=[],
-            reasons=["Low risk job"],
+reasons=["Low risk job"],
             ai_data={"risk_score": 15.0},
             website_data={"is_reachable": True, "has_https": True}
         )
@@ -132,12 +135,16 @@ class TestSubmitEndToEnd:
         
         mock_get_risk_badge.return_value = "🟢 LOW RISK"
         mock_format_admin.return_value = "Admin review card"
-        
+    
         # Start the conversation
         update = self.create_mock_update()
         context = self.create_mock_context()
         
+        # Add message text to avoid AttributeError
+        update.message.text = "/submit"
+        
         result = await submit_start(update, context)
+        print(f"Debug: submit_start returned {result}")
         assert result == 1  # STATE_COMPANY_NAME
         
         # Step 1: Company Name

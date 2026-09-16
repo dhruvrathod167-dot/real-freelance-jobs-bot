@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import (
 from config import settings
 from database.models import Base
 from utils.logger import logger
+from utils.security import InputValidationError
 
 # Build async engine
 engine: AsyncEngine = create_async_engine(
@@ -68,7 +69,19 @@ async def init_db() -> None:
                 for col_name, col_type in columns_to_add:
                     if col_name not in existing_columns:
                         logger.info(f"Adding missing column {col_name} to users table...")
-                        connection.execute(text(f"ALTER TABLE users ADD COLUMN {col_name} {col_type}"))
+                        
+                        # Enhanced security validation
+                        # Validate column name to prevent SQL injection
+                        if not col_name.replace('_', '').isalnum():
+                            raise InputValidationError(f"Invalid column name: {col_name}")
+                        
+                        # Validate column type
+                        if not isinstance(col_type, str) or not col_type.isupper():
+                            raise InputValidationError(f"Invalid column type: {col_type}")
+                        
+                        # Use parameterized query with safe column names
+                        safe_query = text("ALTER TABLE users ADD COLUMN :col_name :col_type")
+                        connection.execute(safe_query, {"col_name": col_name, "col_type": col_type})
 
         await conn.run_sync(migrate_sqlite)
     logger.info("Database schema initialized successfully.")

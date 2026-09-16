@@ -69,21 +69,22 @@ class TestSubmitCallbackSmoke:
 @patch('handlers.jobs._auto_approve_and_publish_job')
 @patch('asyncio.create_task')
 @patch('handlers.jobs.submission_rate_limiter')
+@patch('handlers.jobs.run_full_security_screening')
 @pytest.mark.asyncio
 async def test_submit_callback_low_risk(
-    self,
-    mock_settings,
-    mock_get_user,
-    mock_create_job,
-    mock_get_risk_badge,
-    mock_format_admin,
-    mock_safe_task,
-    mock_delete_message,
-    mock_auto_approve,
-    mock_create_task,
-    mock_rate_limiter,
-    mock_screening
-):
+        self,
+        mock_settings,
+        mock_get_user,
+        mock_create_job,
+        mock_get_risk_badge,
+        mock_format_admin,
+        mock_safe_task,
+        mock_delete_message,
+        mock_auto_approve,
+        mock_create_task,
+        mock_rate_limiter,
+        mock_screening
+    ):
         """Test the actual /submit callback with LOW_RISK auto-approval."""
         
         # Setup mocks
@@ -163,20 +164,21 @@ async def test_submit_callback_low_risk(
 @patch('handlers.jobs._delete_temporary_message')
 @patch('asyncio.create_task')
 @patch('handlers.jobs.submission_rate_limiter')
+@patch('handlers.jobs.run_full_security_screening')
 @pytest.mark.asyncio
 async def test_submit_callback_review_required(
-    self,
-    mock_settings,
-    mock_get_user,
-    mock_create_job,
-    mock_get_risk_badge,
-    mock_format_admin,
-    mock_safe_task,
-    mock_delete_message,
-    mock_create_task,
-    mock_rate_limiter,
-    mock_screening
-):
+        self,
+        mock_settings,
+        mock_get_user,
+        mock_create_job,
+        mock_get_risk_badge,
+        mock_format_admin,
+        mock_safe_task,
+        mock_delete_message,
+        mock_create_task,
+        mock_rate_limiter,
+        mock_screening
+    ):
         """Test the actual /submit callback with REVIEW_REQUIRED."""
         
         # Setup mocks

@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = Field(default="", description="Telegram Bot token from @BotFather")
     BOT_USERNAME: str = Field(default="RealFreelanceJobsBot", description="Bot handle without @")
     ADMIN_IDS_RAW: str = Field(default="", alias="ADMIN_IDS", description="Comma-separated admin Telegram IDs")
-    OWNER_ID_RAW: str = Field(default="5952301026", alias="OWNER_ID", description="Telegram Group Owner user ID (highest authority, full moderation bypass)")
-    TELEGRAM_GROUP_ID: str = Field(default="-1004335696952", description="Group or Channel ID for job broadcasts (Legally Freelancing Working)")
+    OWNER_ID_RAW: str = Field(default="", alias="OWNER_ID", description="Telegram Group Owner user ID (highest authority, full moderation bypass)")
+    TELEGRAM_GROUP_ID: str = Field(default="", description="Group or Channel ID for job broadcasts (Legally Freelancing Working)")
     TELEGRAM_GROUP_NAME: str = Field(default="Legally Freelancing Working", description="Name of the official group")
 
     # Database Settings
@@ -56,8 +56,8 @@ class Settings(BaseSettings):
         elif token.lower().startswith("bot"):
             token = token[3:].strip()
         if ":" not in token:
-            # Automatically prefix the BotFather bot ID if omitted
-            return f"8787634226:{token}"
+            # Token should be complete - don't auto-prefix with hardcoded values
+            return token
         return token
 
     def validate_telegram_token(self) -> tuple[bool, str]:
@@ -88,7 +88,8 @@ class Settings(BaseSettings):
             return False, "Token format invalid: token length is unusual"
 
         # Check for valid characters
-        if not all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for c in parts[1]):
+        valid_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        if not all(c in valid_chars for c in parts[1]):
             return False, "Token format invalid: invalid characters in token"
 
         return True, "Token format is valid"

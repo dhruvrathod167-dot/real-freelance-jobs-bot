@@ -8,6 +8,7 @@ from typing import List, Tuple
 from urllib.parse import urlparse
 import httpx
 from utils.logger import logger
+from utils.security import validate_url
 
 PARKED_DOMAIN_KEYWORDS = [
     "domain is for sale",
@@ -56,18 +57,19 @@ async def check_website(url: str, timeout: float = 6.0) -> WebsiteCheckResult:
     flags: List[str] = []
     risk_points = 0.0
 
-    clean_url = url.strip()
-    if not clean_url.startswith(("http://", "https://")):
-        clean_url = "https://" + clean_url
-
-    parsed = urlparse(clean_url)
-    if not parsed.netloc:
+    # Use centralized security validation
+    valid, error = validate_url(url)
+    if not valid:
         return WebsiteCheckResult(
             is_reachable=False,
             has_https=False,
-            flags=["Invalid website URL format provided"],
-            risk_points=25.0,
+            flags=[error],
+            risk_points=100.0,
         )
+
+    clean_url = url.strip()
+    if not clean_url.startswith(("http://", "https://")):
+        clean_url = "https://" + clean_url
 
     has_https = clean_url.startswith("https://")
     if not has_https:

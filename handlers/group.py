@@ -48,6 +48,7 @@ from services.communication_moderator import (
     scan_communication_message_ai,
 )
 from utils.logger import logger
+from handlers.direct_posts import send_verification_message_if_allowed
 
 
 def format_until_date(until_date: Optional[datetime]) -> str:
@@ -92,7 +93,7 @@ def cleanup_cache(cache: dict, max_age: float = 300.0) -> None:
         cache.pop(key, None)
 
 
-async def onboard_new_member(chat: Chat, user: User, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def onboard_new_member(update: Update, chat: Chat, user: User, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Welcomes a new member joining the community group ("Legally Freelancing Working"),
     enforces unverified posting restrictions, and sends the verification prompt
@@ -190,30 +191,8 @@ async def onboard_new_member(chat: Chat, user: User, context: ContextTypes.DEFAU
     except TelegramError as exc:
         logger.warning(f"Could not restrict new member permissions (bot may need can_restrict_members admin rights): {exc}")
 
-    # 3. Send welcome & verification onboarding message
-    welcome_text = (
-        f"👋 Welcome to <b>{group_title}</b>, {user_mention}!\n\n"
-        f"🛡️ <b>Account Verification Required</b>\n"
-        f"Please verify your account with @{settings.BOT_USERNAME} before posting or submitting freelance jobs.\n\n"
-        f"To protect our community from fraudulent schemes, upfront fees, and unverified solicitations, "
-        f"all new members must complete our quick verification pledge.\n\n"
-        f"👉 <b>Tap the button below to verify your account with the bot:</b>"
-    )
-
-    keyboard = [
-        [InlineKeyboardButton("✅ Verify Account", url=f"https://t.me/{settings.BOT_USERNAME}?start=verify")],
-        [InlineKeyboardButton("📖 Safety Rules", url=f"https://t.me/{settings.BOT_USERNAME}?start=rules")]
-    ]
-
-    try:
-        await context.bot.send_message(
-            chat_id=chat.id,
-            text=welcome_text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    except TelegramError as exc:
-        logger.warning(f"Could not send onboarding verification message in {chat.title}: {exc}")
+    # 3. Send welcome & verification onboarding message (with monthly limit)
+    await send_verification_message_if_allowed(update, context)
 
 
 async def new_member_onboarding_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -226,7 +205,7 @@ async def new_member_onboarding_handler(update: Update, context: ContextTypes.DE
     KNOWN_COMMUNITY_CHATS.add(chat.id)
     new_members = message.new_chat_members or []
     for member in new_members:
-        await onboard_new_member(chat, member, context)
+        await onboard_new_member(update, chat, member, context)
 
 
 async def chat_member_onboarding_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -243,7 +222,7 @@ async def chat_member_onboarding_handler(update: Update, context: ContextTypes.D
     # Detect join transition (from non-member to member)
     if old_status in (ChatMember.LEFT, ChatMember.BANNED) and new_status in (ChatMember.MEMBER, ChatMember.RESTRICTED):
         user = cmu.new_chat_member.user
-        await onboard_new_member(chat, user, context)
+        await onboard_new_member(update, chat, user, context)
 
 
 async def group_message_moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

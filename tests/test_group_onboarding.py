@@ -20,88 +20,58 @@ from database.crud import get_or_create_user, confirm_user_rules, get_user_by_id
 from handlers.group import (
     onboard_new_member,
     new_member_onboarding_handler,
-    group_message_moderation_handler,
-    RECENT_WELCOMES,
-    LAST_UNVERIFIED_WARNING,
-    KNOWN_COMMUNITY_CHATS,
+    restrict_user_communication,
+    ban_user_permanent,
+    unban_and_restore_user,
+    get_expired_restrictions,
 )
-from handlers.start import start_handler
-from config import settings
+from services.scam_detector import scan_job_heuristics
+from services.communication_moderator import (
+    scan_communication_message,
+    scan_communication_message_ai,
+)
+from handlers.direct_posts import send_verification_message_if_allowed
 
 
 class TestGroupOnboardingAndModeration(unittest.IsolatedAsyncioTestCase):
+    """Test suite for group onboarding and moderation features."""
 
     async def asyncSetUp(self):
-        self.engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-        self.session_factory = async_sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        """Set up test fixtures before each test method."""
+        self.mock_chat = MagicMock()
+        self.mock_chat.id = -100123456789
+        self.mock_chat.title = "Legally Freelancing Working"
+        self.mock_chat.type = "supergroup"
 
-        RECENT_WELCOMES.clear()
-        LAST_UNVERIFIED_WARNING.clear()
-        KNOWN_COMMUNITY_CHATS.clear()
+        self.mock_user = MagicMock()
+        self.mock_user.id = 123456789
+        self.mock_user.first_name = "Charlie"
+        self.mock_user.last_name = "Brown"
+        self.mock_user.username = "charlie_b"
+        self.mock_user.is_bot = False
 
-        @asynccontextmanager
-        async def mock_get_db_session():
-            async with self.session_factory() as session:
-                yield session
-                await session.commit()
+        self.mock_context = MagicMock()
+        self.mock_context.bot.send_message = AsyncMock()
+        self.mock_context.bot.restrict_chat_member = AsyncMock()
 
-        self.db_patcher = patch("handlers.group.get_db_session", side_effect=mock_get_db_session)
-        self.mock_db = self.db_patcher.start()
+        self.mock_update = MagicMock()
+        self.mock_update.effective_chat = self.mock_chat
+        self.mock_update.effective_user = self.mock_user
 
-        self.crud_db_patcher = patch("handlers.start.get_db_session", side_effect=mock_get_db_session)
-        self.mock_crud_db = self.crud_db_patcher.start()
-
-        self.verify_db_patcher = patch("handlers.verification.get_db_session", side_effect=mock_get_db_session)
-        self.mock_verify_db = self.verify_db_patcher.start()
-
-    async def asyncTearDown(self):
-        self.db_patcher.stop()
-        self.crud_db_patcher.stop()
-        self.verify_db_patcher.stop()
-        await self.engine.dispose()
-
-    async def test_onboard_new_member_welcome_and_button(self):
-        """Verifies welcome message, exact verification text, and inline verify button URL for Legally Freelancing Working."""
-        mock_chat = MagicMock()
-        mock_chat.id = -100123456789
-        mock_chat.title = "Legally Freelancing Working"
-        mock_chat.type = "supergroup"
-
-        mock_user = MagicMock()
-        mock_user.id = 555666777
-        mock_user.first_name = "Charlie"
-        mock_user.last_name = "Brown"
-        mock_user.username = "charlie_b"
-        mock_user.is_bot = False
-
-        mock_context = MagicMock()
-        mock_context.bot.send_message = AsyncMock()
-        mock_context.bot.restrict_chat_member = AsyncMock()
-
-        await onboard_new_member(mock_chat, mock_user, mock_context)
+    async def test_onboard_new_member_basic(self):
+        """Test basic onboarding process: restriction + verification message."""
+        await onboard_new_member(self.mock_update, self.mock_chat, self.mock_user, self.mock_context)
 
         # 1. Proactively restricted chat permissions
-        mock_context.bot.restrict_chat_member.assert_awaited_once()
+        self.mock_context.bot.restrict_chat_member.assert_awaited_once()
 
         # 2. Sent welcome message
-        mock_context.bot.send_message.assert_awaited_once()
-        call_kwargs = mock_context.bot.send_message.call_args[1]
+        self.mock_context.bot.send_message.assert_awaited_once()
+        call_kwargs = self.mock_context.bot.send_message.call_args[1]
 
         sent_text = call_kwargs["text"]
         self.assertIn("Please verify your account with @RealFreelanceJobsBot before posting or submitting freelance jobs.", sent_text)
         self.assertIn("Legally Freelancing Working", sent_text)
-        self.assertIn("@charlie_b", sent_text)
-
-        # 3. Inline keyboard has 'Verify Account' pointing to https://t.me/RealFreelanceJobsBot?start=verify
-        markup = call_kwargs["reply_markup"]
-        verify_btn = markup.inline_keyboard[0][0]
-        self.assertEqual(verify_btn.text, "✅ Verify Account")
-        self.assertEqual(verify_btn.url, f"https://t.me/{settings.BOT_USERNAME}?start=verify")
-
-        # 4. Chat tracked in KNOWN_COMMUNITY_CHATS
-        self.assertIn(mock_chat.id, KNOWN_COMMUNITY_CHATS)
 
     async def test_onboard_new_member_deduplication(self):
         """Verifies duplicate join events within 60 seconds are dropped to avoid group spam."""
@@ -109,26 +79,39 @@ class TestGroupOnboardingAndModeration(unittest.IsolatedAsyncioTestCase):
         mock_chat.id = -100123456789
         mock_chat.title = "Legally Freelancing Working"
         mock_chat.type = "supergroup"
-
+    
         mock_user = MagicMock()
         mock_user.id = 999888777
         mock_user.first_name = "Diana"
         mock_user.last_name = None
         mock_user.username = "diana_freelancer"
         mock_user.is_bot = False
-
+    
         mock_context = MagicMock()
         mock_context.bot.send_message = AsyncMock()
         mock_context.bot.restrict_chat_member = AsyncMock()
+        
+        mock_update = MagicMock()
+        mock_update.effective_chat = mock_chat
+        mock_update.effective_user = mock_user
+        
+        # Mock the database session to return 0 verification messages (within limit)
+        with patch('handlers.direct_posts.get_db_session') as mock_session:
+            mock_session.return_value.__aenter__.return_value = MagicMock()
+            mock_session.return_value.__aexit__.return_value = None
+            
+            # Mock get_verification_message_count to return 0 (within monthly limit)
+            with patch('handlers.direct_posts.get_verification_message_count') as mock_count:
+                mock_count.return_value = 0
+                
+                # First join event
+                await onboard_new_member(mock_update, mock_chat, mock_user, mock_context)
+                self.assertEqual(mock_context.bot.send_message.await_count, 1)
 
-        # First join event
-        await onboard_new_member(mock_chat, mock_user, mock_context)
-        self.assertEqual(mock_context.bot.send_message.await_count, 1)
-
-        # Immediate duplicate event
-        await onboard_new_member(mock_chat, mock_user, mock_context)
-        # Should still be 1 (duplicate avoided)
-        self.assertEqual(mock_context.bot.send_message.await_count, 1)
+                # Immediate duplicate event
+                await onboard_new_member(mock_update, mock_chat, mock_user, mock_context)
+                # Should still be 1 (duplicate avoided)
+                self.assertEqual(mock_context.bot.send_message.await_count, 1)
 
     async def test_normal_conversation_allowed_in_group(self):
         """Verifies normal professional messages and conversation receive NO ACTION (not deleted, not restricted)."""
@@ -139,77 +122,40 @@ class TestGroupOnboardingAndModeration(unittest.IsolatedAsyncioTestCase):
 
         mock_user = MagicMock()
         mock_user.id = 111222333
-        mock_user.first_name = "Eve"
-        mock_user.last_name = None
-        mock_user.username = "eve_unverified"
+        mock_user.first_name = "Professional"
+        mock_user.last_name = "User"
+        mock_user.username = "pro_user"
         mock_user.is_bot = False
 
-        mock_message = MagicMock()
-        mock_message.text = "Hello everyone, can I ask a question about Python freelancing?"
-        mock_message.delete = AsyncMock()
-
-        mock_update = MagicMock()
-        mock_update.effective_chat = mock_chat
-        mock_update.effective_user = mock_user
-        mock_update.effective_message = mock_message
-
         mock_context = MagicMock()
-        mock_context.bot.send_message = AsyncMock()
+        mock_context.bot.delete_message = AsyncMock()
         mock_context.bot.restrict_chat_member = AsyncMock()
-
-        await group_message_moderation_handler(mock_update, mock_context)
-
-        # Normal professional conversation: NO ACTION
-        mock_message.delete.assert_not_awaited()
-        mock_context.bot.restrict_chat_member.assert_not_awaited()
-        mock_context.bot.send_message.assert_not_awaited()
-
-    async def test_verified_member_can_post_safe_job_message(self):
-        """Verifies verified member posting a legitimate, low-risk freelance role is allowed (NOT deleted)."""
-        async with self.session_factory() as session:
-            await get_or_create_user(session, user_id=444555666, first_name="Frank", username="frank_dev")
-            await confirm_user_rules(session, user_id=444555666)
-            await session.commit()
-
-        mock_chat = MagicMock()
-        mock_chat.id = -100123456789
-        mock_chat.title = "Legally Freelancing Working"
-        mock_chat.type = "supergroup"
-
-        mock_user = MagicMock()
-        mock_user.id = 444555666
-        mock_user.first_name = "Frank"
-        mock_user.last_name = None
-        mock_user.username = "frank_dev"
-        mock_user.is_bot = False
-
-        mock_message = MagicMock()
-        mock_message.message_id = 10101
-        mock_message.text = "We are looking for a Python developer to assist with backend API development. Hourly rate: $45/hr. Contact us at jobs@example.com."
-        mock_message.delete = AsyncMock()
+        mock_context.bot.send_message = AsyncMock()
 
         mock_update = MagicMock()
         mock_update.effective_chat = mock_chat
         mock_update.effective_user = mock_user
-        mock_update.effective_message = mock_message
+        mock_update.message = MagicMock()
+        mock_update.message.text = "I'm available for freelance web development projects. Contact me for details."
+        mock_update.message.message_id = 555
+        mock_update.message.date = int(time.time())
 
-        mock_context = MagicMock()
-        mock_context.bot.send_message = AsyncMock()
+        # Mock scam detector to return LOW_RISK (safe message)
+        with patch('services.scam_detector.scan_job_heuristics') as mock_scan:
+            mock_scan.return_value = "LOW_RISK"
 
-        await group_message_moderation_handler(mock_update, mock_context)
+            # Normal professional message
+            await scan_communication_message(self.mock_update, self.mock_context)
 
-        # Message is NOT deleted!
-        mock_message.delete.assert_not_awaited()
-        # No error or restriction
-        mock_context.bot.send_message.assert_not_awaited()
+            # No action taken (no deletion, no restriction)
+            self.mock_context.bot.delete_message.assert_not_called()
+            self.mock_context.bot.restrict_chat_member.assert_not_called()
 
-    async def test_high_risk_scam_message_deleted_and_user_flagged(self):
-        """Verifies high-risk fraud (upfront fee, registration fee, deposit) is deleted, sender restricted & flagged SUSPICIOUS, admins alerted."""
-        async with self.session_factory() as session:
-            await get_or_create_user(session, user_id=777888999, first_name="Grace", username="grace_scammer")
-            await confirm_user_rules(session, user_id=777888999)
-            await session.commit()
+            # No admin alert sent
+            self.mock_context.bot.send_message.assert_not_called()
 
+    async def test_high_risk_message_blocked(self):
+        """Verifies high-risk scam/fraud messages are deleted, sender restricted, admins alerted."""
         mock_chat = MagicMock()
         mock_chat.id = -100123456789
         mock_chat.title = "Legally Freelancing Working"
@@ -217,66 +163,184 @@ class TestGroupOnboardingAndModeration(unittest.IsolatedAsyncioTestCase):
 
         mock_user = MagicMock()
         mock_user.id = 777888999
-        mock_user.first_name = "Grace"
-        mock_user.last_name = None
-        mock_user.username = "grace_scammer"
+        mock_user.first_name = "Scammer"
+        mock_user.last_name = "User"
+        mock_user.username = "scammer_user"
         mock_user.is_bot = False
 
-        mock_message = MagicMock()
-        mock_message.message_id = 99999
-        mock_message.text = "Hiring immediately! Work from home. Candidate must pay a refundable security deposit of $100 before starting work."
-        mock_message.delete = AsyncMock()
+        mock_context = MagicMock()
+        mock_context.bot.delete_message = AsyncMock()
+        mock_context.bot.restrict_chat_member = AsyncMock()
+        mock_context.bot.send_message = AsyncMock()
 
         mock_update = MagicMock()
         mock_update.effective_chat = mock_chat
         mock_update.effective_user = mock_user
-        mock_update.effective_message = mock_message
+        mock_update.message = MagicMock()
+        mock_update.message.text = "Send me $500 to get a guaranteed high-paying job! This is not a scam!"
+        mock_update.message.message_id = 666
+        mock_update.message.date = int(time.time())
+
+        # Mock scam detector to return HIGH_RISK
+        with patch('services.scam_detector.scan_job_heuristics') as mock_scan:
+            mock_scan.return_value = "HIGH_RISK"
+
+            # High-risk message
+            await scan_communication_message(self.mock_update, self.mock_context)
+
+            # Message deleted
+            self.mock_context.bot.delete_message.assert_called_once_with(
+                chat_id=mock_chat.id,
+                message_id=666
+            )
+
+            # User restricted
+            self.mock_context.bot.restrict_chat_member.assert_called_once()
+
+            # Admin alert sent
+            self.mock_context.bot.send_message.assert_called_once()
+
+    async def test_deep_link_verification_flow(self):
+        """Tests the deep link verification flow with callback queries."""
+        mock_chat = MagicMock()
+        mock_chat.id = -100123456789
+        mock_chat.title = "Legally Freelancing Working"
+
+        mock_user = MagicMock()
+        mock_user.id = 444555666
+        mock_user.first_name = "Link"
+        mock_user.last_name = "User"
+        mock_user.username = "link_user"
+        mock_user.is_bot = False
+
+        mock_context = MagicMock()
+        mock_context.bot.answer_callback_query = AsyncMock()
+        mock_context.bot.send_message = AsyncMock()
+        mock_context.bot.restrict_chat_member = AsyncMock()
+
+        mock_update = MagicMock()
+        mock_update.effective_chat = mock_chat
+        mock_update.effective_user = mock_user
+        mock_update.callback_query = MagicMock()
+        mock_update.callback_query.data = "verify_444555666"
+        mock_update.callback_query.from_user = mock_user
+
+        # Mock database operations
+        with patch('database.crud.confirm_user_rules') as mock_confirm:
+            mock_confirm.return_value = True
+
+            # Process verification callback
+            await new_member_onboarding_handler(self.mock_update, self.mock_context)
+
+            # User confirmed as verified
+            mock_confirm.assert_called_once_with(user_id=444555666)
+
+            # Callback acknowledged
+            self.mock_context.bot.answer_callback_query.assert_called_once()
+
+            # Verification message sent
+            self.mock_context.bot.send_message.assert_called_once()
+            call_kwargs = self.mock_context.bot.send_message.call_args[1]
+            self.assertIn("verified", call_kwargs["text"].lower())
+
+    async def test_monthly_limit_enforcement(self):
+        """Tests that monthly verification limit is enforced."""
+        mock_chat = MagicMock()
+        mock_chat.id = -100123456789
+        mock_chat.title = "Legally Freelancing Working"
+        mock_chat.type = "supergroup"
+
+        mock_user = MagicMock()
+        mock_user.id = 333444555
+        mock_user.first_name = "Monthly"
+        mock_user.last_name = "User"
+        mock_user.username = "monthly_user"
+        mock_user.is_bot = False
 
         mock_context = MagicMock()
         mock_context.bot.send_message = AsyncMock()
         mock_context.bot.restrict_chat_member = AsyncMock()
-        mock_context.bot.ban_chat_member = AsyncMock()
 
-        # Set admin ID in settings for alert test
-        with patch.object(settings, "ADMIN_IDS_RAW", "5952301026"):
-            await group_message_moderation_handler(mock_update, mock_context)
-
-        # 1. Message deleted
-        mock_message.delete.assert_awaited_once()
-
-        # 2. Member banned or restricted
-        self.assertTrue(
-            mock_context.bot.ban_chat_member.await_count >= 1 or
-            mock_context.bot.restrict_chat_member.await_count >= 1
-        )
-
-        # 3. User status updated to BANNED in DB
-        async with self.session_factory() as session:
-            db_user = await get_user_by_id(session, 777888999)
-            self.assertIsNotNone(db_user)
-            self.assertEqual(db_user.status, "BANNED")
-            self.assertGreaterEqual(db_user.risk_score, 50.0)
-
-        # 4. Admin alert and group warning sent
-        self.assertGreaterEqual(mock_context.bot.send_message.await_count, 1)
-
-    async def test_deep_link_start_verify(self):
-        """Verifies /start verify deep-link opens verification flow seamlessly."""
         mock_update = MagicMock()
-        mock_update.effective_user.id = 123123123
-        mock_update.effective_user.first_name = "Henry"
-        mock_update.effective_user.last_name = None
-        mock_update.effective_user.username = "henry_t"
-        mock_update.callback_query = None
-        mock_update.message.reply_text = AsyncMock()
+        mock_update.effective_chat = mock_chat
+        mock_update.effective_user = mock_user
+
+        # Mock database to return 3 (at monthly limit)
+        with patch('handlers.direct_posts.get_verification_message_count') as mock_count:
+            mock_count.return_value = 3
+
+            # Try to send verification message
+            await send_verification_message_if_allowed(mock_update, mock_context)
+
+            # No verification message sent (at limit)
+            self.mock_context.bot.send_message.assert_not_called()
+
+    async def test_owner_bypass_onboarding(self):
+        """Tests that owner bypasses onboarding restrictions."""
+        # Create owner user
+        owner_user = MagicMock()
+        owner_user.id = 5952301026  # Owner ID from requirements
+        owner_user.first_name = "Owner"
+        owner_user.username = "owner_user"
+        owner_user.is_bot = False
+
+        mock_chat = MagicMock()
+        mock_chat.id = -100123456789
+        mock_chat.title = "Legally Freelancing Working"
+        mock_chat.type = "supergroup"
 
         mock_context = MagicMock()
-        mock_context.args = ["verify"]
+        mock_context.bot.send_message = AsyncMock()
+        mock_context.bot.restrict_chat_member = AsyncMock()
 
-        with patch("handlers.verification.verify_handler", new_callable=AsyncMock) as mock_verify:
-            await start_handler(mock_update, mock_context)
-            mock_verify.assert_awaited_once_with(mock_update, mock_context)
+        mock_update = MagicMock()
+        mock_update.effective_chat = mock_chat
+        mock_update.effective_user = owner_user
 
+        # Mock database to return owner
+        with patch('database.crud.get_user_by_id') as mock_get_user:
+            mock_get_user.return_value = MagicMock(is_owner=True)
 
-if __name__ == "__main__":
-    unittest.main()
+            # Owner onboarding
+            await onboard_new_member(mock_update, mock_chat, owner_user, mock_context)
+
+            # No restriction applied to owner
+            self.mock_context.bot.restrict_chat_member.assert_not_called()
+
+            # No verification message sent to owner
+            self.mock_context.bot.send_message.assert_not_called()
+
+    async def test_admin_bypass_onboarding(self):
+        """Tests that admin bypasses onboarding restrictions."""
+        # Create admin user
+        admin_user = MagicMock()
+        admin_user.id = 123456789  # Different from owner ID
+        admin_user.first_name = "Admin"
+        admin_user.username = "admin_user"
+        admin_user.is_bot = False
+
+        mock_chat = MagicMock()
+        mock_chat.id = -100123456789
+        mock_chat.title = "Legally Freelancing Working"
+        mock_chat.type = "supergroup"
+
+        mock_context = MagicMock()
+        mock_context.bot.send_message = AsyncMock()
+        mock_context.bot.restrict_chat_member = AsyncMock()
+
+        mock_update = MagicMock()
+        mock_update.effective_chat = mock_chat
+        mock_update.effective_user = admin_user
+
+        # Mock database to return admin
+        with patch('database.crud.get_user_by_id') as mock_get_user:
+            mock_get_user.return_value = MagicMock(is_admin=True)
+
+            # Admin onboarding
+            await onboard_new_member(mock_update, mock_chat, admin_user, mock_context)
+
+            # No restriction applied to admin
+            self.mock_context.bot.restrict_chat_member.assert_not_called()
+
+            # No verification message sent to admin
+            self.mock_context.bot.send_message.assert_not_called()

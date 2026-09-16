@@ -8,8 +8,9 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import User, Job, VerificationEvent, Report, AuditLog, EmployerProfile, Appeal
+from database.models import User, Job, VerificationEvent, Report, AuditLog, EmployerProfile, Appeal, VerificationMessage
 from utils.logger import logger
+from utils.security import SecurityError, AuthorizationError
 
 
 async def get_or_create_user(
@@ -90,6 +91,16 @@ async def set_user_status(
     actor_id: int = 0
 ) -> Optional[User]:
     """Updates user verification status (VERIFIED, RESTRICTED, BANNED)."""
+    from config import settings
+    
+    # Prevent banning or restricting the owner
+    if settings.is_owner(user_id) and status in ("BANNED", "RESTRICTED"):
+        raise AuthorizationError("Owner cannot be banned or restricted")
+    
+    # Prevent admins from banning other admins (unless they're the owner)
+    if settings.is_admin(user_id) and not settings.is_owner(actor_id) and status == "BANNED":
+        raise AuthorizationError("Admins cannot ban other admins")
+    
     stmt = select(User).where(User.id == user_id)
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
@@ -406,6 +417,16 @@ async def restrict_user_communication(
     actor_id: int = 0
 ) -> Optional[User]:
     """Restricts user from sending messages for a specified number of days (default 4 days)."""
+    from config import settings
+    
+    # Prevent restricting the owner
+    if settings.is_owner(user_id):
+        raise AuthorizationError("Owner cannot be restricted")
+    
+    # Prevent admins from restricting other admins (unless they're the owner)
+    if settings.is_admin(user_id) and not settings.is_owner(actor_id):
+        raise AuthorizationError("Admins cannot restrict other admins")
+    
     stmt = select(User).where(User.id == user_id)
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
@@ -445,6 +466,16 @@ async def ban_user_permanent(
     risk_score: Optional[float] = None,
 ) -> Optional[User]:
     """Permanently bans a user from community participation."""
+    from config import settings
+    
+    # Prevent banning the owner
+    if settings.is_owner(user_id):
+        raise AuthorizationError("Owner cannot be banned")
+    
+    # Prevent admins from banning other admins (unless they're the owner)
+    if settings.is_admin(user_id) and not settings.is_owner(actor_id):
+        raise AuthorizationError("Admins cannot ban other admins")
+    
     stmt = select(User).where(User.id == user_id)
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
@@ -612,3 +643,36 @@ async def resolve_appeal(
         await session.flush()
 
     return appeal
+
+
+async def get_verification_message_count(
+    session: AsyncSession,
+    user_id: int,
+    message_type: str,
+    calendar_month: int
+) -> int:
+    """Get count of verification messages sent to a user in a specific calendar month."""
+    stmt = select(func.count(VerificationMessage.id)).where(
+        VerificationMessage.user_id == user_id,
+        VerificationMessage.message_type == message_type,
+        VerificationMessage.calendar_month == calendar_month
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one() or 0
+
+
+async def create_verification_message(
+    session: AsyncSession,
+    user_id: int,
+    message_type: str,
+    calendar_month: int
+) -> VerificationMessage:
+    """Create a verification message tracking entry."""
+    verification_msg = VerificationMessage(
+        user_id=user_id,
+        message_type=message_type,
+        calendar_month=calendar_month
+    )
+    session.add(verification_msg)
+    await session.flush()
+    return verification_msg

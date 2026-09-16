@@ -416,8 +416,12 @@ class TestOwnerFullBypass(unittest.IsolatedAsyncioTestCase):
         context.bot = MagicMock()
         context.bot.send_message = AsyncMock()
         context.bot.restrict_chat_member = AsyncMock()
+        
+        update = MagicMock()
+        update.effective_user = user
+        update.effective_chat = chat
 
-        await onboard_new_member(chat, user, context)
+        await onboard_new_member(update, chat, user, context)
 
         # Owner should never have their permissions restricted (only granted)
         # The function should only be called to grant permissions, not restrict
