@@ -221,6 +221,9 @@ async def call_gemini_api(payload_text: str) -> Optional[dict]:
                 return extract_json_from_text(content)
             except (KeyError, IndexError):
                 logger.error(f"Unexpected Gemini response structure: {data}")
+        elif resp.status_code == 429:
+            logger.warning("Gemini quota exhausted (HTTP 429), falling back to heuristic analysis")
+            return None  # This will trigger fallback in analyze_job_with_ai
         else:
             logger.warning(f"Gemini API returned HTTP {resp.status_code}: {resp.text}")
     except Exception as exc:
@@ -270,6 +273,9 @@ async def call_openai_api(payload_text: str) -> Optional[dict]:
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
             return extract_json_from_text(content)
+        elif resp.status_code == 429:
+            logger.warning("OpenAI quota exhausted (HTTP 429), falling back to heuristic analysis")
+            return None  # This will trigger fallback in analyze_job_with_ai
         else:
             logger.warning(f"OpenAI API returned HTTP {resp.status_code}: {resp.text}")
     except Exception as exc:
@@ -318,6 +324,11 @@ async def analyze_job_with_ai(
             parsed_result = await call_gemini_api(job_payload)
     except Exception as exc:
         logger.error(f"Error calling AI analyzer provider: {exc}", exc_info=True)
+
+    # If AI quota is exhausted (returns None), use fallback
+    if parsed_result is None:
+        logger.info("AI quota exhausted or unavailable; using heuristic analysis fallback.")
+        return _build_fallback_result(heuristic_flags)
 
     if parsed_result:
         try:

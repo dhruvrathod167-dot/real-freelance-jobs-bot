@@ -384,6 +384,10 @@ async def confirm_job_submission_callback(update: Update, context: ContextTypes.
     user = update.effective_user
     draft = context.user_data.get("job_draft")
 
+    # Log incoming submission safely
+    logger.info(f"Job submission received - User ID: {user.id if user else 'Unknown'}, Chat type: {update.effective_chat.type if update.effective_chat else 'Unknown'}")
+    logger.info("Job submission handler entered")
+
     if not draft or not user:
         await query.message.edit_text("❌ Submission session expired. Please send /submit again.")
         return ConversationHandler.END
@@ -396,6 +400,8 @@ async def confirm_job_submission_callback(update: Update, context: ContextTypes.
     )
     acknowledgment_msg_obj = await query.message.edit_text(acknowledgment_msg, parse_mode="HTML")
     
+    logger.info("Acknowledgment sent to user")
+    
     # Schedule auto-delete of acknowledgment message after 10 seconds
     asyncio.create_task(_safe_background_task(
         _delete_temporary_message(acknowledgment_msg_obj, 10),
@@ -403,6 +409,8 @@ async def confirm_job_submission_callback(update: Update, context: ContextTypes.
     ))
 
     # Run automated screening pipeline asynchronously
+    logger.info("Background verification task created")
+    
     # Check if we have a pre-set decision for testing
     if "screening_decision" in context.user_data:
         decision = context.user_data["screening_decision"]
@@ -623,6 +631,8 @@ async def confirm_job_submission_callback(update: Update, context: ContextTypes.
 
     await query.message.edit_text(user_response, parse_mode="HTML")
     context.user_data.clear()
+    
+    logger.info(f"Job submission process completed for Job ID: {job_id}, User ID: {user.id}, Final Status: {decision.action}")
     
     # Only reset rate limits for normal users, not owner/admin
     user_id = user.id
