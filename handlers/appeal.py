@@ -4,6 +4,7 @@ Provides /appeal command in private bot chat for restricted or banned members
 to submit formal reconsideration requests to administrators.
 """
 
+import asyncio
 import html
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
@@ -26,8 +27,17 @@ async def appeal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not user or not chat:
         return
 
-    if not command_rate_limiter.is_allowed(user.id):
-        return
+    try:
+        if not asyncio.run(command_rate_limiter.is_allowed(user.id)):
+            retry_secs = command_rate_limiter.retry_after(user.id)
+            await update.message.reply_text(f"⏳ Please wait {retry_secs}s before sending another command.")
+            return
+    except RuntimeError:
+        # We're already in an event loop, check synchronously
+        if not command_rate_limiter.is_allowed(user.id):
+            retry_secs = command_rate_limiter.retry_after(user.id)
+            await update.message.reply_text(f"⏳ Please wait {retry_secs}s before sending another command.")
+            return
 
     # Check if called in a group
     if chat.type != "private":

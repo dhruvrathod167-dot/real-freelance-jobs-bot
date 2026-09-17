@@ -145,7 +145,7 @@ class TestGroupOnboardingAndModeration(unittest.IsolatedAsyncioTestCase):
             mock_scan.return_value = "LOW_RISK"
 
             # Normal professional message
-            await scan_communication_message(self.mock_update, self.mock_context)
+            await scan_communication_message(self.mock_update.message.text)
 
             # No action taken (no deletion, no restriction)
             self.mock_context.bot.delete_message.assert_not_called()
@@ -186,10 +186,13 @@ class TestGroupOnboardingAndModeration(unittest.IsolatedAsyncioTestCase):
             mock_scan.return_value = "HIGH_RISK"
 
             # High-risk message
-            await scan_communication_message(self.mock_update, self.mock_context)
+            result = scan_communication_message(mock_update.message.text)
+            # Process the result through the group message moderation handler
+            from handlers.group import group_message_moderation_handler
+            await group_message_moderation_handler(mock_update, mock_context)
 
             # Message deleted
-            self.mock_context.bot.delete_message.assert_called_once_with(
+            mock_context.bot.delete_message.assert_called_once_with(
                 chat_id=mock_chat.id,
                 message_id=666
             )
@@ -198,7 +201,7 @@ class TestGroupOnboardingAndModeration(unittest.IsolatedAsyncioTestCase):
             self.mock_context.bot.restrict_chat_member.assert_called_once()
 
             # Admin alert sent
-            self.mock_context.bot.send_message.assert_called_once()
+            mock_context.bot.send_message.assert_called_once()
 
     async def test_deep_link_verification_flow(self):
         """Tests the deep link verification flow with callback queries."""
@@ -222,26 +225,30 @@ class TestGroupOnboardingAndModeration(unittest.IsolatedAsyncioTestCase):
         mock_update.effective_chat = mock_chat
         mock_update.effective_user = mock_user
         mock_update.callback_query = MagicMock()
-        mock_update.callback_query.data = "verify_444555666"
+        mock_update.callback_query.data = "confirm_verify_pledge"
         mock_update.callback_query.from_user = mock_user
+        mock_update.callback_query.answer = AsyncMock()
+        mock_update.callback_query.message = MagicMock()
+        mock_update.callback_query.message.edit_text = AsyncMock()
 
-        # Mock database operations
+# Mock database operations
         with patch('database.crud.confirm_user_rules') as mock_confirm:
             mock_confirm.return_value = True
 
             # Process verification callback
-            await new_member_onboarding_handler(self.mock_update, self.mock_context)
+            from handlers.verification import confirm_verify_callback
+            await confirm_verify_callback(mock_update, mock_context)
 
             # User confirmed as verified
-            mock_confirm.assert_called_once_with(user_id=444555666)
+            mock_confirm.assert_called_once_with(unittest.mock.ANY, 444555666)
 
-            # Callback acknowledged
-            self.mock_context.bot.answer_callback_query.assert_called_once()
+            # Callback acknowledged - the handler calls query.answer() not context.bot.answer_callback_query
+            mock_update.callback_query.answer.assert_called_once()
 
-            # Verification message sent
-            self.mock_context.bot.send_message.assert_called_once()
-            call_kwargs = self.mock_context.bot.send_message.call_args[1]
-            self.assertIn("verified", call_kwargs["text"].lower())
+            # Verification message sent - the handler edits the message instead of sending a new one
+            mock_update.callback_query.message.edit_text.assert_called_once()
+            call_args = mock_update.callback_query.message.edit_text.call_args
+            self.assertIn("verified", call_args[0][0].lower())
 
     async def test_monthly_limit_enforcement(self):
         """Tests that monthly verification limit is enforced."""

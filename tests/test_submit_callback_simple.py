@@ -15,7 +15,14 @@ class TestSubmitCallbackSmoke:
     
     def create_mock_update(self, user_id=12345):
         """Create a mock update with specified user"""
-        update = MagicMock(spec=Update)
+        from unittest.mock import AsyncMock
+        
+        # Create the update first
+        update = MagicMock()
+        # Ensure the update object works properly in async context
+        update._asyncio_mock = True
+        
+        # Set up effective_user
         update.effective_user = MagicMock(spec=User)
         update.effective_user.id = user_id
         update.effective_user.first_name = "Test"
@@ -24,15 +31,21 @@ class TestSubmitCallbackSmoke:
         update.effective_user.status = "VERIFIED"
         update.effective_user.rules_accepted = True
         
+        # Set up effective_chat
         update.effective_chat = MagicMock(spec=Chat)
         update.effective_chat.type = "private"
         
+        # Set up message
         update.message = MagicMock()
         update.message.edit_text = AsyncMock()
+        update.message.text = "Test message"
         
-        update.callback_query = MagicMock(spec=CallbackQuery)
-        update.callback_query.answer = AsyncMock()
-        update.callback_query.message = update.message
+        # Set up callback_query - this is the key fix
+        callback_query = MagicMock(spec=CallbackQuery)
+        callback_query.from_user = update.effective_user  # Set the from_user
+        callback_query.answer = AsyncMock()
+        callback_query.message = update.message
+        update.callback_query = callback_query
         
         return update
     
@@ -68,7 +81,7 @@ class TestSubmitCallbackSmoke:
 @patch('handlers.jobs._delete_temporary_message')
 @patch('handlers.jobs._auto_approve_and_publish_job')
 @patch('asyncio.create_task')
-@patch('handlers.jobs.submission_rate_limiter')
+@patch('handlers.jobs.rate_limiter_manager')
 @patch('handlers.jobs.run_full_security_screening')
 @pytest.mark.asyncio
 async def test_submit_callback_low_risk(
@@ -96,8 +109,8 @@ async def test_submit_callback_low_risk(
         mock_user.rules_accepted = True
         mock_get_user.return_value = mock_user
         
-        mock_rate_limiter.is_allowed.return_value = True
-        mock_rate_limiter.reset = AsyncMock()
+        mock_rate_limiter.check_limit.return_value = (True, None)
+        mock_rate_limiter.reset_user_limits = AsyncMock()
         
         # Mock screening decision for LOW_RISK
         from services.moderation import ModerationDecision
@@ -163,7 +176,7 @@ async def test_submit_callback_low_risk(
 @patch('handlers.jobs._safe_background_task')
 @patch('handlers.jobs._delete_temporary_message')
 @patch('asyncio.create_task')
-@patch('handlers.jobs.submission_rate_limiter')
+@patch('utils.rate_limiter.rate_limiter_manager')
 @patch('handlers.jobs.run_full_security_screening')
 @pytest.mark.asyncio
 async def test_submit_callback_review_required(
@@ -190,8 +203,8 @@ async def test_submit_callback_review_required(
         mock_user.rules_accepted = True
         mock_get_user.return_value = mock_user
         
-        mock_rate_limiter.is_allowed.return_value = True
-        mock_rate_limiter.reset = AsyncMock()
+        mock_rate_limiter.check_limit.return_value = (True, None)
+        mock_rate_limiter.reset_user_limits = AsyncMock()
         
         # Mock screening decision for REVIEW_REQUIRED
         from services.moderation import ModerationDecision

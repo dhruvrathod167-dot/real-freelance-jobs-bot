@@ -28,7 +28,7 @@ from handlers.admin import (
     PENDING_MODERATION_MESSAGES,
 )
 from handlers.group import group_message_moderation_handler
-from utils.rate_limiter import submission_rate_limiter
+from utils.rate_limiter import rate_limiter_manager
 from config import settings
 
 
@@ -101,7 +101,7 @@ class TestRepeatableJobPostingWorkflow(unittest.IsolatedAsyncioTestCase):
         await _execute_approval(job_id=job1_id, admin_id=5952301026, context=mock_context, reply_target=mock_reply_target)
 
         # Rate limiter is cleared for user
-        self.assertTrue(submission_rate_limiter.is_allowed(user_id))
+        self.assertTrue(rate_limiter_manager.limiters["submissions"].is_allowed(user_id))
 
         # Submission #2 immediately after
         async with self.session_factory() as session:
@@ -135,7 +135,7 @@ class TestRepeatableJobPostingWorkflow(unittest.IsolatedAsyncioTestCase):
         await _execute_rejection(job_id=job2_id, admin_id=5952301026, reason="Duplicate role", context=mock_context, reply_target=mock_reply_target)
 
         # Rate limiter remains cleared and user can submit Job #3
-        self.assertTrue(submission_rate_limiter.is_allowed(user_id))
+        self.assertTrue(asyncio.run(rate_limiter_manager.limiters["submissions"].is_allowed)(user_id))
 
         async with self.session_factory() as session:
             job3 = await create_job_submission(

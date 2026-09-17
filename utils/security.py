@@ -266,11 +266,17 @@ def log_security_event(event_type: str, user_id: int, details: dict = None) -> N
             import asyncio
             
             async def log_to_audit():
-                await create_audit_entry(
-                    user_id=user_id,
-                    action=event_type,
-                    target_details=str(details) if details else None
-                )
+                # Get database session
+                from database.db import get_db_session
+                async with get_db_session() as session:
+                    await create_audit_entry(
+                        session=session,
+                        actor_id=user_id,
+                        action=event_type,
+                        target_type="SECURITY_EVENT",
+                        target_id=str(user_id),
+                        details=str(details) if details else None
+                    )
             
             # Run in background to avoid blocking
             asyncio.create_task(log_to_audit())

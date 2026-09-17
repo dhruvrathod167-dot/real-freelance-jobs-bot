@@ -532,6 +532,105 @@ def run_security_tests():
     return test_results
 
 
+class TestRateLimitBypass:
+    """Test admin/owner rate limit bypass functionality."""
+    
+    @pytest.mark.asyncio
+    async def test_owner_rate_limit_bypass(self):
+        """Test that owner bypasses rate limits."""
+        from utils.rate_limiter import rate_limiter_manager
+        
+        # Mock owner ID
+        owner_id = 12345  # This would be the actual owner ID from config
+        
+        # Mock settings.is_owner to return True
+        import config.settings as settings_mock
+        original_is_owner = settings_mock.is_owner
+        settings_mock.is_owner = lambda user_id: user_id == owner_id
+        
+        try:
+            # Test that owner can exceed rate limits
+            result1 = await rate_limiter_manager.check_limit(owner_id, "submissions")
+            assert result1[0] is True  # Should be allowed
+            
+            # Simulate multiple requests that would normally trigger rate limit
+            for i in range(10):
+                result = await rate_limiter_manager.check_limit(owner_id, "submissions")
+                assert result[0] is True  # All should be allowed for owner
+            
+        finally:
+            # Restore original function
+            settings_mock.is_owner = original_is_owner
+    
+    @pytest.mark.asyncio
+    async def test_admin_rate_limit_bypass(self):
+        """Test that admin bypasses /submit rate limits."""
+        from utils.rate_limiter import rate_limiter_manager
+        
+        # Mock admin ID
+        admin_id = 67890  # This would be an actual admin ID from config
+        
+        # Mock settings.is_admin to return True
+        import config.settings as settings_mock
+        original_is_admin = settings_mock.is_admin
+        settings_mock.is_admin = lambda user_id: user_id == admin_id
+        
+        try:
+            # Test that admin can exceed /submit rate limits
+            result1 = await rate_limiter_manager.check_limit(admin_id, "submissions")
+            assert result1[0] is True  # Should be allowed
+            
+            # Simulate multiple requests that would normally trigger rate limit
+            for i in range(10):
+                result = await rate_limiter_manager.check_limit(admin_id, "submissions")
+                assert result[0] is True  # All should be allowed for admin
+            
+        finally:
+            # Restore original function
+            settings_mock.is_admin = original_is_admin
+    
+    @pytest.mark.asyncio
+    async def test_normal_user_rate_limit_applies(self):
+        """Test that normal users still have rate limits."""
+        from utils.rate_limiter import rate_limiter_manager
+        
+        normal_user_id = 11111
+        
+        # Test normal user rate limiting
+        result1 = await rate_limiter_manager.check_limit(normal_user_id, "submissions")
+        assert result1[0] is True  # First request should be allowed
+        
+        # Simulate multiple requests
+        for i in range(5):  # Should trigger rate limit
+            result = await rate_limiter_manager.check_limit(normal_user_id, "submissions")
+            if i >= 4:  # 5th request should be rate limited
+                assert result[0] is False
+    
+    @pytest.mark.asyncio
+    async def test_owner_cannot_be_blocked(self):
+        """Test that owner cannot be blocked by rate limiter."""
+        from utils.rate_limiter import rate_limiter_manager
+        
+        owner_id = 12345
+        
+        # Mock settings.is_owner to return True
+        import config.settings as settings_mock
+        original_is_owner = settings_mock.is_owner
+        settings_mock.is_owner = lambda user_id: user_id == owner_id
+        
+        try:
+            # Try to block owner - should not work
+            await rate_limiter_manager.block_user(owner_id, duration=300, reason="Test")
+            
+            # Owner should still be able to make requests
+            result = await rate_limiter_manager.check_limit(owner_id, "submissions")
+            assert result[0] is True
+            
+        finally:
+            # Restore original function
+            settings_mock.is_owner = original_is_owner
+
+
 if __name__ == "__main__":
     # Run the security tests
     results = run_security_tests()

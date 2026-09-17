@@ -4,6 +4,7 @@ Provides welcoming, accessible onboarding, transparent community guidelines,
 and clear usage instructions for all members.
 """
 
+import asyncio
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from config import settings
@@ -24,10 +25,16 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not user:
         return
 
-    if not command_rate_limiter.is_allowed(user.id):
-        retry_secs = command_rate_limiter.retry_after(user.id)
-        await update.message.reply_text(f"⏳ Please wait {retry_secs}s before sending another command.")
-        return
+    try:
+        if not asyncio.run(command_rate_limiter.is_allowed(user.id)):
+            retry_secs = command_rate_limiter.retry_after(user.id)
+            await update.message.reply_text(f"⏳ Please wait {retry_secs}s before sending another command.")
+            return
+    except RuntimeError:
+        if not command_rate_limiter.is_allowed(user.id):
+            retry_secs = command_rate_limiter.retry_after(user.id)
+            await update.message.reply_text(f"⏳ Please wait {retry_secs}s before sending another command.")
+            return
 
     # Ensure user record exists in database
     async with get_db_session() as session:
@@ -100,8 +107,23 @@ async def rules_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not user:
         return
 
-    if not command_rate_limiter.is_allowed(user.id):
-        return
+    try:
+        if not asyncio.run(command_rate_limiter.is_allowed(user.id)):
+            retry_secs = command_rate_limiter.retry_after(user.id)
+            if update.callback_query:
+                await update.callback_query.answer(f"⏳ Please wait {retry_secs}s before sending another command.", show_alert=True)
+            else:
+                await update.message.reply_text(f"⏳ Please wait {retry_secs}s before sending another command.")
+            return
+    except RuntimeError:
+        # We're already in an event loop, check synchronously
+        if not command_rate_limiter.is_allowed(user.id):
+            retry_secs = command_rate_limiter.retry_after(user.id)
+            if update.callback_query:
+                await update.callback_query.answer(f"⏳ Please wait {retry_secs}s before sending another command.", show_alert=True)
+            else:
+                await update.message.reply_text(f"⏳ Please wait {retry_secs}s before sending another command.")
+            return
 
     rules_text = (
         "📜 <b>COMMUNITY RULES & CONDUCT GUIDELINES</b>\n"
@@ -134,8 +156,23 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not user:
         return
 
-    if not command_rate_limiter.is_allowed(user.id):
-        return
+    try:
+        if not asyncio.run(command_rate_limiter.is_allowed(user.id)):
+            retry_secs = command_rate_limiter.retry_after(user.id)
+            if update.callback_query:
+                await update.callback_query.answer(f"⏳ Please wait {retry_secs}s before sending another command.", show_alert=True)
+            else:
+                await update.message.reply_text(f"⏳ Please wait {retry_secs}s before sending another command.")
+            return
+    except RuntimeError:
+        # We're already in an event loop, check synchronously
+        if not command_rate_limiter.is_allowed(user.id):
+            retry_secs = command_rate_limiter.retry_after(user.id)
+            if update.callback_query:
+                await update.callback_query.answer(f"⏳ Please wait {retry_secs}s before sending another command.", show_alert=True)
+            else:
+                await update.message.reply_text(f"⏳ Please wait {retry_secs}s before sending another command.")
+            return
 
     help_text = (
         "💡 <b>REAL FREELANCE JOBS HELP & FAQ</b>\n"
@@ -169,14 +206,24 @@ async def myid_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not user:
         return
 
-    if not command_rate_limiter.is_allowed(user.id):
-        retry = command_rate_limiter.retry_after(user.id)
-        msg = f"⏳ Please wait {retry}s."
-        if update.callback_query:
-            await update.callback_query.answer(msg, show_alert=True)
-        else:
-            await update.message.reply_text(msg)
-        return
+    try:
+        if not asyncio.run(command_rate_limiter.is_allowed(user.id)):
+            retry = command_rate_limiter.retry_after(user.id)
+            msg = f"⏳ Please wait {retry}s."
+            if update.callback_query:
+                await update.callback_query.answer(msg, show_alert=True)
+            else:
+                await update.message.reply_text(msg)
+            return
+    except RuntimeError:
+        if not command_rate_limiter.is_allowed(user.id):
+            retry = command_rate_limiter.retry_after(user.id)
+            msg = f"⏳ Please wait {retry}s."
+            if update.callback_query:
+                await update.callback_query.answer(msg, show_alert=True)
+            else:
+                await update.message.reply_text(msg)
+            return
 
     async with get_db_session() as session:
         db_user = await get_user_by_id(session, user.id)
@@ -210,8 +257,23 @@ async def monetization_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not user:
         return
 
-    if not command_rate_limiter.is_allowed(user.id):
-        return
+    try:
+        if not asyncio.run(command_rate_limiter.is_allowed(user.id)):
+            retry_secs = command_rate_limiter.retry_after(user.id)
+            if update.callback_query:
+                await update.callback_query.answer(f"⏳ Please wait {retry_secs}s before sending another command.", show_alert=True)
+            else:
+                await update.message.reply_text(f"⏳ Please wait {retry_secs}s before sending another command.")
+            return
+    except RuntimeError:
+        # We're already in an event loop, check synchronously
+        if not command_rate_limiter.is_allowed(user.id):
+            retry_secs = command_rate_limiter.retry_after(user.id)
+            if update.callback_query:
+                await update.callback_query.answer(f"⏳ Please wait {retry_secs}s before sending another command.", show_alert=True)
+            else:
+                await update.message.reply_text(f"⏳ Please wait {retry_secs}s before sending another command.")
+            return
 
     text = format_monetization_card()
 

@@ -5,6 +5,7 @@ Verifies that job submission works only in private chat and not in group chats.
 
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
+from unittest import IsolatedAsyncioTestCase
 from telegram import Update, User, Chat
 from telegram.ext import ContextTypes, ConversationHandler
 
@@ -12,7 +13,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from handlers.jobs import submit_start
 
 
-class TestPrivateJobSubmission(unittest.TestCase):
+class TestPrivateJobSubmission(IsolatedAsyncioTestCase):
     """Test cases for private job submission workflow."""
 
     def setUp(self):

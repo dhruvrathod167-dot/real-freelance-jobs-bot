@@ -177,21 +177,21 @@ async def submit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         suspicious_notice = ""
 
     # Rate limiting (bypassed for administrators)
-    if not settings.is_admin(user.id):
-        allowed, retry_after = await rate_limiter_manager.check_limit(user.id, "submissions")
-        if not allowed:
-            await query.message.reply_text(
-                f"⚠️ <i>Rate limit exceeded. Please wait {retry_after} seconds before submitting another job.</i>",
-                parse_mode="HTML"
-            )
-            return ConversationHandler.END
-        msg = "⏳ <b>Rate Limit Reached</b>\nYou have reached the submission limit. Please try again later."
-        if update.callback_query:
-            await update.callback_query.answer()
-            await update.callback_query.message.reply_text(msg, parse_mode="HTML")
-        else:
-            await update.message.reply_text(msg, parse_mode="HTML")
+    # Rate limiting already handles admin/owner bypass in check_limit
+    allowed, retry_after = await rate_limiter_manager.check_limit(user.id, "submissions")
+    if not allowed:
+        await query.message.reply_text(
+            f"⚠️ <i>Rate limit exceeded. Please wait {retry_after} seconds before submitting another job.</i>",
+            parse_mode="HTML"
+        )
         return ConversationHandler.END
+    msg = "⏳ <b>Rate Limit Reached</b>\nYou have reached the submission limit. Please try again later."
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(msg, parse_mode="HTML")
+    else:
+        await update.message.reply_text(msg, parse_mode="HTML")
+    return ConversationHandler.END
 
     # Clear previous job draft in context
     context.user_data.clear()
@@ -467,16 +467,22 @@ async def confirm_job_submission_callback(update: Update, context: ContextTypes.
 
     badge = get_risk_badge(decision.final_score, decision.risk_level)
 
-    # AUTOMATIC APPROVAL FOR LOW_RISK JOBS
+    # AUTOMATIC APPROVAL FOR LOW_RISK JOBS (only for normal users, not owner/admin)
     if decision.action == "queue" and decision.risk_level == "low":
-        # Automatically approve and publish LOW_RISK jobs
-        try:
-            await _auto_approve_and_publish_job(context, query, user, draft, job_id, decision)
-            return ConversationHandler.END
-        except Exception as exc:
-            logger.error(f"Auto-approval failed for job {job_id}: {exc}")
-            # Fall back to manual review
+        # Owner and Admin can submit HIGH_RISK jobs that go to manual review
+        # Normal users with LOW_RISK jobs get auto-approval
+        if settings.is_owner(user.id) or settings.is_admin(user.id):
+            logger.info(f"Owner/Admin {user.id} submitted HIGH_RISK job {job_id} - routing to manual review")
             decision.action = "hold_review"
+        else:
+            # Automatically approve and publish LOW_RISK jobs for normal users
+            try:
+                await _auto_approve_and_publish_job(context, query, user, draft, job_id, decision)
+                return ConversationHandler.END
+            except Exception as exc:
+                logger.error(f"Auto-approval failed for job {job_id}: {exc}")
+                # Fall back to manual review
+                decision.action = "hold_review"
     
     # Alert administrators only for REVIEW_REQUIRED or HIGH_RISK jobs
     if decision.action in ["hold_review", "block_review"]:
@@ -617,7 +623,12 @@ async def confirm_job_submission_callback(update: Update, context: ContextTypes.
 
     await query.message.edit_text(user_response, parse_mode="HTML")
     context.user_data.clear()
-    await rate_limiter_manager.reset_user_limits(user.id)
+    
+    # Only reset rate limits for normal users, not owner/admin
+    user_id = user.id
+    if not (settings.is_owner(user_id) or settings.is_admin(user_id)):
+        await rate_limiter_manager.reset_user_limits(user_id)
+    
     return ConversationHandler.END
 
 
@@ -625,7 +636,10 @@ async def cancel_job_submission(update: Update, context: ContextTypes.DEFAULT_TY
     """Cancels ongoing job submission."""
     context.user_data.clear()
     if update.effective_user:
-        await rate_limiter_manager.reset_user_limits(update.effective_user.id)
+        user_id = update.effective_user.id
+        # Only reset rate limits for normal users, not owner/admin
+        if not (settings.is_owner(user_id) or settings.is_admin(user_id)):
+            await rate_limiter_manager.reset_user_limits(user_id)
     msg = "Submission cancelled. You can restart anytime using /submit."
     if update.callback_query:
         await update.callback_query.answer()

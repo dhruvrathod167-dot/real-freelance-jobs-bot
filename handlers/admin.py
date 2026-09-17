@@ -824,6 +824,23 @@ async def _execute_approval(
                     await reply_target.reply_text("❌ Job not found.")
                 return
 
+            # Verify authorization and check if admin is approving their own job
+            is_owner = settings.is_owner(admin_id)
+            is_admin_user = settings.is_admin(admin_id)
+            submitter_id = job.user_id
+            
+            # Check if admin is trying to approve their own job
+            if submitter_id == admin_id and not is_owner:
+                error_msg = "❌ <i>Administrators cannot approve their own job submissions.</i>\n\nAnother authorized administrator or the owner must review this job."
+                try:
+                    if pending_message:
+                        await context.bot.send_message(chat_id=admin_id, text=error_msg, parse_mode="HTML")
+                    elif reply_target:
+                        await reply_target.reply_text(error_msg, parse_mode="HTML")
+                except Exception:
+                    pass
+                return
+
             # Prevent duplicate approval/broadcast if already approved and broadcasted
             if job.status == "APPROVED" and job.channel_message_id:
                 await delete_pending_moderation_messages(job_id=job_id, bot=context.bot, current_msg=pending_message)
@@ -898,7 +915,27 @@ async def _execute_approval(
 
             # 3. Update Database Status
             if broadcast_success:
-                admin_notes = f"Approved by admin {admin_id}"
+                # Determine approval type for audit logging
+                if submitter_id == admin_id and is_owner:
+                    approval_type = "OWNER_MANUAL_OVERRIDE"
+                    admin_notes = f"Owner approved own job {job_id} (OWNER_MANUAL_OVERRIDE)"
+                elif is_owner:
+                    approval_type = "OWNER_MANUAL_APPROVAL"
+                    admin_notes = f"Owner approved job {job_id} (OWNER_MANUAL_APPROVAL)"
+                else:
+                    approval_type = "ADMIN_MANUAL_APPROVAL"
+                    admin_notes = f"Admin approved job {job_id} (ADMIN_MANUAL_APPROVAL)"
+                
+                # Record audit log for manual approval
+                await create_audit_entry(
+                    session=session,
+                    actor_id=admin_id,
+                    action=f"MANUAL_APPROVE_AND_PUBLISH_{approval_type}",
+                    target_type="JOB",
+                    target_id=str(job_id),
+                    details=f"User {submitter_id}, Risk {job.risk_level}"
+                )
+                
                 await update_job_status(
                     session=session,
                     job_id=job_id,

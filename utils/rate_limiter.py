@@ -8,7 +8,7 @@ import asyncio
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 from utils.logger import logger
-from utils.security import log_security_event
+from utils.security import log_security_event, is_owner, is_admin
 
 
 class SecurityRateLimiter:
@@ -24,6 +24,11 @@ class SecurityRateLimiter:
     async def is_allowed(self, user_id: int, action: str = "general") -> bool:
         """Returns True if the request is permitted, False if rate limited."""
         async with self.lock:
+            # Owner cannot be rate limited or blocked
+            if is_owner(user_id):
+                logger.debug(f"Owner {user_id} bypassing rate limit check for {action}")
+                return True
+
             # Check if user is permanently blocked
             if user_id in self.blocked_users:
                 unblock_time, reason = self.blocked_users[user_id]
@@ -131,6 +136,15 @@ class RateLimitManager:
     async def check_limit(self, user_id: int, action_type: str) -> Tuple[bool, Optional[int]]:
         """Check if user is allowed to perform an action.
         Returns (allowed, retry_after_seconds)"""
+        # Special handling for /submit - bypass rate limits for owner/admin
+        if action_type == "submissions":
+            if is_owner(user_id):
+                logger.info(f"Owner {user_id} bypassing /submit rate limit")
+                return True, None
+            if is_admin(user_id):
+                logger.info(f"Admin {user_id} bypassing /submit rate limit")
+                return True, None
+        
         limiter = self.limiters.get(action_type)
         if not limiter:
             logger.warning(f"Unknown rate limit action type: {action_type}")
@@ -157,11 +171,21 @@ class RateLimitManager:
 
     async def block_user(self, user_id: int, duration: int = 300, reason: str = "Security violation") -> None:
         """Block user across all rate limiters."""
+        # Owner cannot be blocked by rate limiter
+        if is_owner(user_id):
+            logger.info(f"Owner {user_id} cannot be blocked by rate limiter")
+            return
+        
         for limiter in self.limiters.values():
             await limiter.block_user(user_id, duration, reason)
 
     async def unblock_user(self, user_id: int) -> None:
         """Unblock user across all rate limiters."""
+        # Owner cannot be in blocked state
+        if is_owner(user_id):
+            logger.info(f"Owner {user_id} cannot be unblocked from rate limiter (not blocked)")
+            return
+        
         for limiter in self.limiters.values():
             await limiter.unblock_user(user_id)
 
