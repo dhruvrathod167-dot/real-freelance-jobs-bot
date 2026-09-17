@@ -140,6 +140,19 @@ async def submit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             await update.message.reply_text(msg, parse_mode="HTML")
         return ConversationHandler.END
 
+    # Debug logging for /submit access
+    from config import settings
+    is_owner_user = settings.is_owner(user.id)
+    is_admin_user = settings.is_admin(user.id)
+    rate_limit_bypass = is_owner_user or is_admin_user
+    
+    logger.info(f"/submit user_id={user.id} is_owner={is_owner_user} is_admin={is_admin_user} rate_limit_bypass={rate_limit_bypass} chat_type={chat.type}")
+    
+    if is_owner_user:
+        logger.info(f"Owner {user.id} accessing /submit - full bypass")
+    elif is_admin_user:
+        logger.info(f"Admin {user.id} accessing /submit - rate limit bypass")
+
     # Check user verification status in DB
     async with get_db_session() as session:
         db_user = await get_user_by_id(session, user.id)
@@ -180,18 +193,8 @@ async def submit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     # Rate limiting already handles admin/owner bypass in check_limit
     allowed, retry_after = await rate_limiter_manager.check_limit(user.id, "submissions")
     if not allowed:
-        await query.message.reply_text(
-            f"⚠️ <i>Rate limit exceeded. Please wait {retry_after} seconds before submitting another job.</i>",
-            parse_mode="HTML"
-        )
+        logger.warning(f"Rate limit reached for user {user.id} despite check_limit returning not allowed")
         return ConversationHandler.END
-    msg = "⏳ <b>Rate Limit Reached</b>\nYou have reached the submission limit. Please try again later."
-    if update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.message.reply_text(msg, parse_mode="HTML")
-    else:
-        await update.message.reply_text(msg, parse_mode="HTML")
-    return ConversationHandler.END
 
     # Clear previous job draft in context
     context.user_data.clear()
